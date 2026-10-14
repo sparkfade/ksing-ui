@@ -43,7 +43,15 @@ PHOST="$(echo "$PANEL_URL" | sed 's|https://||; s|:[0-9]*$||; s|^\[||; s|\]$||')
 PPORT="$(echo "$PANEL_URL" | grep -oE '[0-9]+$' || true)"
 PPORT="${PPORT:-443}"
 [[ "$PHOST" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$PHOST" =~ ^[0-9a-fA-F:]+$ ]] || { echo "面板主机非法: $PHOST"; exit 1; }
-CURL="curl -fsSL --cacert $DIR/panel-ca.pem --resolve ksing-panel-agent:$PPORT:$PHOST"
+# curl --resolve 只接受 IP: 域名先解析 (优先 IPv4, 兜底 IPv6)
+if ! [[ "$PHOST" =~ ^[0-9.]+$ ]] && ! [[ "$PHOST" =~ ^[0-9a-fA-F:]+$ ]]; then
+  RIP="$(getent ahostsv4 "$PHOST" | awk 'NR==1{print $1}')"
+  [ -n "$RIP" ] || RIP="$(getent ahostsv6 "$PHOST" | awk 'NR==1{print $1}')"
+  [ -n "$RIP" ] || { echo "面板域名解析失败: $PHOST"; exit 1; }
+  PHOST="$RIP"
+fi
+case "$PHOST" in *:*) RHOST="[$PHOST]" ;; *) RHOST="$PHOST" ;; esac  # IPv6 需方括号
+CURL="curl -fsSL --cacert $DIR/panel-ca.pem --resolve ksing-panel-agent:$PPORT:$RHOST"
 PINNED_URL="https://ksing-panel-agent:$PPORT"
 
 echo "[1/5] 下载 sing-box ($ARCH) ..."
