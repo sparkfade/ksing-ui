@@ -102,7 +102,7 @@ echo "[3/5] 写入 agent 配置 ..."
 cat > "$DIR/agent.json" <<EOF
 {"panel": "$PANEL_URL", "sid": "$SID", "token": "$TOKEN",
  "ca": "$DIR/panel-ca.pem", "dir": "$DIR", "bin": "$BIN",
- "pull_interval": 30, "push_interval": 30}
+ "pull_interval": 30, "push_interval": 10}
 EOF
 chmod 600 "$DIR/agent.json"
 

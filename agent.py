@@ -34,7 +34,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -52,7 +52,7 @@ BIN = _C.get("bin", "/usr/local/bin/sing-box")
 CA = _C.get("ca", os.path.join(DIR, "panel-ca.pem"))
 STATS = _C.get("stats", "127.0.0.1:18899")
 PULL_INTERVAL = int(_C.get("pull_interval", 30))
-PUSH_INTERVAL = int(_C.get("push_interval", 30))
+PUSH_INTERVAL = int(_C.get("push_interval", 10))
 STATE_PATH = os.path.join(DIR, "agent-state.json")
 RULESET_DIR = os.path.join(DIR, "rulesets")
 
@@ -383,9 +383,35 @@ def query_public_ip():
     return ""
 
 
+def self_update(resp):
+    """面板下发的 agent_sha256 与自身不一致时, 从面板拉新版本并原地重启 (TLS 钉扎通道)"""
+    want = resp.get("agent_sha256")
+    if not want:
+        return
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() == want:
+                return
+        data = api("GET", "/agent/agent.py")
+        if hashlib.sha256(data).hexdigest() != want:
+            log("agent 更新包校验失败, 跳过")
+            return
+        me = os.path.abspath(__file__)
+        tmp = me + ".new"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, me)
+        log("agent 已自更新, 重启")
+        os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
+    except Exception as e:  # noqa: BLE001
+        log("agent 自更新失败: %s" % e)
+
+
 def pull_config(state, wait=0):
     cur = state.get("hash", "")
     resp = api_json("GET", "/agent/config?hash=%s&wait=%d" % (cur, wait), timeout=wait + 45)
+    self_update(resp)
     if resp.get("unchanged"):
         return False
     sync_rulesets(resp.get("rulesets", []))
@@ -424,10 +450,12 @@ def singbox_running():
 
 
 def cert_info():
-    """采集节点证书状态: acme 模式扫 certmagic 存储目录, 否则读 $DIR/cert.pem"""
+    """采集节点证书状态: acme 模式扫 certmagic 存储目录 (新/旧两种布局), 否则读 $DIR/cert.pem"""
     import glob
-    candidates = glob.glob(os.path.join(DIR, "acme", "*", "sites", "*", "*.crt"))
+    candidates = glob.glob(os.path.join(DIR, "acme", "certificates", "*", "*", "*.crt"))  # certmagic 现行布局
+    candidates += glob.glob(os.path.join(DIR, "acme", "*", "sites", "*", "*.crt"))        # 旧版布局
     candidates.append(os.path.join(DIR, "cert.pem"))
+    best = None
     for fp in candidates:
         if not os.path.isfile(fp):
             continue
@@ -445,10 +473,11 @@ def cert_info():
             mi = re.search(r"issuer=.+", r.stdout)
             if mi:
                 issuer = mi.group(0)[7:].strip()[:128]
-            return {"not_after": exp, "issuer": issuer}
+            if not best or exp > best["not_after"]:
+                best = {"not_after": exp, "issuer": issuer}
         except Exception:  # noqa: BLE001
             continue
-    return None
+    return best
 
 
 def report(state):

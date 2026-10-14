@@ -35,22 +35,54 @@
         </div>
       </div>
 
-      <!-- 流量概览 -->
-      <div class="card">
-        <h3 class="card-title">流量统计</h3>
-        <div class="tflow">
-          <div class="tf-item">
-            <span class="tf-k">总上行</span>
-            <span class="tf-v mono">↑ {{ fmtBytes(totalUp) }}</span>
+      <!-- 实时带宽 + 系统状态 -->
+      <div class="grid2">
+        <div class="card">
+          <h3 class="card-title">实时带宽<span class="live-dot" title="每 3 秒刷新"></span></h3>
+          <div class="rates">
+            <div class="rate-item">
+              <span class="tf-k"><b class="arr up">↑</b> 上行速率</span>
+              <span class="rate-v mono up">{{ fmtBytes(rates?.total.rate_up) }}/s</span>
+            </div>
+            <div class="rate-item">
+              <span class="tf-k"><b class="arr down">↓</b> 下行速率</span>
+              <span class="rate-v mono down">{{ fmtBytes(rates?.total.rate_down) }}/s</span>
+            </div>
           </div>
-          <div class="tf-item">
-            <span class="tf-k">总下行</span>
-            <span class="tf-v mono">↓ {{ fmtBytes(totalDown) }}</span>
+          <div v-if="serverRates.length" class="srv-rates">
+            <div v-for="r in serverRates" :key="r.sid" class="srv-rate">
+              <span class="muted">{{ r.name }}</span>
+              <span class="mono">↑{{ fmtBytes(r.rate_up) }}/s ↓{{ fmtBytes(r.rate_down) }}/s</span>
+            </div>
           </div>
-          <div class="tf-item">
-            <span class="tf-k">合计</span>
-            <span class="tf-v mono total">{{ fmtBytes(totalUp + totalDown) }}</span>
+          <div class="tflow-total muted">
+            总流量 ↑ {{ fmtBytes(totalUp) }} ↓ {{ fmtBytes(totalDown) }} · 合计 {{ fmtBytes(totalUp + totalDown) }}
           </div>
+        </div>
+
+        <div class="card">
+          <h3 class="card-title">系统状态</h3>
+          <template v-if="sys">
+            <div class="sys-row">
+              <span class="sys-label">CPU</span>
+              <div class="bar"><i :class="lvlClass(sys.cpu)" :style="{ width: clampPct(sys.cpu) + '%' }"></i></div>
+              <span class="sys-val mono">{{ sys.cpu.toFixed(0) }}%</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label">内存</span>
+              <div class="bar"><i :class="lvlClass(sys.mem.percent)" :style="{ width: clampPct(sys.mem.percent) + '%' }"></i></div>
+              <span class="sys-val mono">{{ fmtBytes(sys.mem.used) }}/{{ fmtBytes(sys.mem.total) }}</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label">磁盘</span>
+              <div class="bar"><i :class="lvlClass(sys.disk.percent)" :style="{ width: clampPct(sys.disk.percent) + '%' }"></i></div>
+              <span class="sys-val mono">{{ fmtBytes(sys.disk.used) }}/{{ fmtBytes(sys.disk.total) }}</span>
+            </div>
+            <div class="sys-foot muted">
+              负载 {{ sys.load.map((n) => n.toFixed(2)).join(' ') }} · 运行时间 {{ fmtUptime(sys.uptime) }}
+            </div>
+          </template>
+          <Empty v-else text="加载中…" />
         </div>
       </div>
 
@@ -98,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Badge from '@/component/ui/Badge.vue'
 import Button from '@/component/ui/Button.vue'
@@ -107,13 +139,26 @@ import Spinner from '@/component/ui/Spinner.vue'
 import { get } from '@/util/request'
 import { toast } from '@/util/toast'
 import { fmtAgo, fmtBytes } from '@/util/format'
-import type { ServerItem, StatusData, TrafficData } from '@/types'
+import type { ServerItem, StatusData, SystemInfo, TrafficData } from '@/types'
 
 const router = useRouter()
 const st = ref<StatusData>()
 const servers = ref<ServerItem[]>([])
 const traffic = ref<TrafficData>({ users: {}, servers: {} })
+const sys = ref<SystemInfo>()
 const loading = ref(false)
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+const rates = computed(() => traffic.value.rates)
+
+const serverRates = computed(() =>
+  servers.value.map((s) => ({
+    sid: s.sid,
+    name: s.name,
+    rate_up: traffic.value.rates?.servers?.[s.sid]?.rate_up || 0,
+    rate_down: traffic.value.rates?.servers?.[s.sid]?.rate_down || 0,
+  })),
+)
 
 const totalUp = computed(() => Object.values(traffic.value.users).reduce((a, t) => a + (t?.up || 0), 0))
 const totalDown = computed(() => Object.values(traffic.value.users).reduce((a, t) => a + (t?.down || 0), 0))
@@ -158,7 +203,47 @@ async function loadAll() {
   }
 }
 
-onMounted(loadAll)
+async function poll() {
+  if (document.hidden) return
+  try {
+    const [tf, si] = await Promise.all([
+      get<TrafficData>('/api/traffic'),
+      get<SystemInfo>('/api/system'),
+    ])
+    traffic.value = tf
+    sys.value = si
+  } catch {
+    /* 轮询失败静默，401 已由 request 处理 */
+  }
+}
+
+function clampPct(n: number): number {
+  return Math.min(100, Math.max(0, n || 0))
+}
+
+function lvlClass(pct: number): string {
+  if (pct > 85) return 'lvl-red'
+  if (pct >= 60) return 'lvl-yellow'
+  return 'lvl-green'
+}
+
+function fmtUptime(sec: number): string {
+  if (!sec) return '-'
+  const d = Math.floor(sec / 86400)
+  const h = Math.floor((sec % 86400) / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  if (d > 0) return `${d} 天 ${h} 小时`
+  if (h > 0) return `${h} 小时 ${m} 分钟`
+  return `${m} 分钟`
+}
+
+onMounted(() => {
+  loadAll()
+  poll()
+  pollTimer = setInterval(poll, 3000)
+})
+
+onUnmounted(() => clearInterval(pollTimer))
 </script>
 
 <style scoped>
@@ -192,13 +277,13 @@ onMounted(loadAll)
   font-weight: 400;
 }
 
-.tflow {
+.rates {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
 
-.tf-item {
+.rate-item {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -212,13 +297,95 @@ onMounted(loadAll)
   color: var(--c-text-dim);
 }
 
-.tf-v {
-  font-size: 18px;
-  font-weight: 600;
+.rate-v {
+  font-size: 22px;
+  font-weight: 700;
 }
 
-.tf-v.total {
+.rate-v.up,
+.arr.up {
+  color: var(--c-green);
+}
+
+.rate-v.down,
+.arr.down {
   color: var(--c-primary);
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-green);
+  box-shadow: 0 0 6px var(--c-green);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.srv-rates {
+  margin-top: 12px;
+  border-top: 1px dashed var(--c-border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.srv-rate {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.tflow-total {
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.sys-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.sys-label {
+  width: 36px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--c-text-dim);
+}
+
+.sys-val {
+  width: 118px;
+  text-align: right;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.sys-foot {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--c-border);
+  font-size: 12.5px;
+}
+
+.bar i.lvl-green {
+  background: var(--c-green);
+}
+
+.bar i.lvl-yellow {
+  background: var(--c-yellow);
+}
+
+.bar i.lvl-red {
+  background: var(--c-red);
 }
 
 .grid2 {

@@ -1075,7 +1075,96 @@ def h_servers_config(ctx):
 
 
 def h_traffic(ctx):
-    return 200, sbtool.load_traffic(BASE)
+    t = sbtool.load_traffic(BASE)
+    t["rates"] = current_rates()
+    return 200, t
+
+
+# ------------------------------------------------------------------ 实时带宽速率
+
+_RATES_LOCK = threading.Lock()
+_RATES = {"total": {"at": 0, "rate_up": 0.0, "rate_down": 0.0}, "servers": {}}
+
+
+def note_report_rates(sid, clean):
+    """每次节点上报时按增量/间隔计算即时速率 (B/s)"""
+    now = time.time()
+    up = sum(p[0] for p in clean.values())
+    down = sum(p[1] for p in clean.values())
+    with _RATES_LOCK:
+        for key in ("total", sid):
+            cur = _RATES["total"] if key == "total" else _RATES["servers"].setdefault(
+                key, {"at": 0, "rate_up": 0.0, "rate_down": 0.0})
+            if cur["at"]:
+                dt = max(now - cur["at"], 1.0)
+                cur["rate_up"] = up / dt
+                cur["rate_down"] = down / dt
+            cur["at"] = now
+
+
+def current_rates():
+    now = time.time()
+    with _RATES_LOCK:
+        def pack(r):
+            if not r["at"] or now - r["at"] > 90:  # 超过 90 秒没上报, 速率归零
+                return {"rate_up": 0.0, "rate_down": 0.0}
+            return {"rate_up": round(r["rate_up"], 1), "rate_down": round(r["rate_down"], 1)}
+        return {"total": pack(_RATES["total"]),
+                "servers": {sid: pack(r) for sid, r in _RATES["servers"].items()}}
+
+
+# ------------------------------------------------------------------ 系统状态 (3x-ui 风格)
+
+_SYS_PREV = {"cpu": None}
+
+
+def h_system(ctx):
+    """面板主机的 CPU/内存/磁盘/负载 (读 /proc, 纯标准库)"""
+    out = {"cpu": 0.0, "mem": {}, "disk": {}, "load": [], "uptime": 0}
+    try:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()[1:]
+        vals = list(map(int, parts))
+        idle = vals[3] + vals[4]
+        total = sum(vals)
+        prev = _SYS_PREV["cpu"]
+        if prev:
+            dt = total - prev[1]
+            di = idle - prev[0]
+            out["cpu"] = round(max(0.0, min(100.0, (1 - di / dt) * 100)), 1) if dt > 0 else 0.0
+        _SYS_PREV["cpu"] = (idle, total)
+    except OSError:
+        pass
+    try:
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                mem[k.strip()] = int(v.strip().split()[0]) * 1024
+        total = mem.get("MemTotal", 0)
+        avail = mem.get("MemAvailable", 0)
+        out["mem"] = {"total": total, "used": total - avail,
+                      "percent": round((total - avail) / total * 100, 1) if total else 0}
+    except (OSError, ValueError):
+        pass
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        out["disk"] = {"total": total, "used": total - free,
+                       "percent": round((total - free) / total * 100, 1) if total else 0}
+    except OSError:
+        pass
+    try:
+        out["load"] = list(os.getloadavg())
+    except OSError:
+        pass
+    try:
+        with open("/proc/uptime") as f:
+            out["uptime"] = int(float(f.read().split()[0]))
+    except OSError:
+        pass
+    return 200, out
 
 
 def h_agent_info(ctx):
@@ -1150,9 +1239,25 @@ def h_agent_config(ctx):
                     _CONFPULL.pop(ctx.sid, None)
     touch_server(ctx.sid, last_seen=int(time.time()), reported_ip=ctx.client_ip)
     if cur and cur == h:
-        return 200, {"unchanged": True, "hash": h}
+        # 即使配置未变也带上 agent 版本信息, 便于节点自更新
+        return 200, {"unchanged": True, "hash": h, "agent_sha256": agent_py_sha256()}
     bundle = call_sbtool(sbtool.server_bundle, BASE, ctx.sid)
+    bundle["agent_sha256"] = agent_py_sha256()
     return 200, bundle
+
+
+_AGENT_SHA = {"at": 0, "sha": ""}
+
+
+def agent_py_sha256():
+    if time.time() - _AGENT_SHA["at"] > 30 or not _AGENT_SHA["sha"]:
+        try:
+            with open(os.path.join(ROOT, "agent.py"), "rb") as f:
+                _AGENT_SHA["sha"] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            pass
+        _AGENT_SHA["at"] = time.time()
+    return _AGENT_SHA["sha"]
 
 
 def h_agent_ruleset(ctx):
@@ -1211,6 +1316,7 @@ def h_agent_report(ctx):
         if isinstance(pair, list) and len(pair) == 2:
             clean[name] = pair
     sbtool.add_traffic(BASE, ctx.sid, clean)
+    note_report_rates(ctx.sid, clean)
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
@@ -1314,6 +1420,7 @@ ROUTES = [
     ("POST", r"/api/servers/([0-9a-f]{8})/token", h_servers_token, "admin"),
     ("GET", r"/api/servers/([0-9a-f]{8})/config", h_servers_config, "admin"),
     ("GET", r"/api/traffic", h_traffic, "admin"),
+    ("GET", r"/api/system", h_system, "admin"),
     ("GET", r"/api/certs", h_certs, "admin"),
     ("GET", r"/api/agent-info", h_agent_info, "admin"),
     ("GET", r"/api/users", h_users_list, "admin"),

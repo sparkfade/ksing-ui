@@ -70,9 +70,26 @@ export interface ServerConfigPreview {
   rulesets: unknown[]
 }
 
+export interface RateStat {
+  rate_up: number
+  rate_down: number
+}
+
 export interface TrafficData {
   users: Record<string, TrafficStat>
   servers: Record<string, TrafficStat & { users?: Record<string, TrafficStat> }>
+  rates?: {
+    total: RateStat
+    servers: Record<string, RateStat>
+  }
+}
+
+export interface SystemInfo {
+  cpu: number
+  mem: { total: number; used: number; percent: number }
+  disk: { total: number; used: number; percent: number }
+  load: [number, number, number]
+  uptime: number
 }
 
 export interface CertItem {
