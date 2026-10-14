@@ -49,6 +49,7 @@
         <div class="form-grid">
           <Input v-model="form.sub_host" label="订阅地址 host" hint="留空跟随访问地址" placeholder="sub.example.com 或 1.2.3.4:8080" />
           <Input v-model="form.sub_path" label="订阅路径" hint="默认 sub" placeholder="sub" />
+          <Input v-model.number="form.sub_port" label="订阅端口" hint="0 = 跟随订阅地址或请求端口; 反代到 443 之类场景填 443" type="number" placeholder="0" />
         </div>
         <p class="muted" style="margin: 12px 0 0; font-size: 12.5px">
           修改路径后旧订阅地址立即失效；配合用户页的重置订阅可快速换发。
@@ -103,6 +104,7 @@ const form = reactive({
   agent_port: 9443,
   sub_host: '',
   sub_path: 'sub',
+  sub_port: 0,
 })
 
 const adminForm = reactive({
@@ -137,6 +139,7 @@ async function load() {
       agent_port: s.agent_port ?? 9443,
       sub_host: s.sub_host ?? '',
       sub_path: s.sub_path || 'sub',
+      sub_port: s.sub_port ?? 0,
     })
     adminForm.new_username = s.admin_user
     nodeTags.value = Object.keys(nd).sort()
@@ -154,6 +157,7 @@ async function save() {
       ...form,
       panel_port: Number(form.panel_port),
       agent_port: Number(form.agent_port),
+      sub_port: Number(form.sub_port) || 0,
     })
     toast('设置已保存，已自动下发到相关节点', 'success')
   } catch (e) {

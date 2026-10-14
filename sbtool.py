@@ -190,7 +190,8 @@ DEFAULT_SETTINGS = {
     "agent_listen": "::",      # agent 专用 HTTPS 监听地址
     "agent_port": 9443,        # agent 专用 HTTPS 端口 (面板 UI 不经过此端口)
     # ---- 订阅发布 ----
-    "sub_host": "",            # 订阅地址的 host (域名或 IP, 可带 :端口; 空=跟随请求)
+    "sub_host": "",            # 订阅地址的主机 (域名或 IP, 可带 :端口; 空=跟随请求 Host)
+    "sub_port": 0,             # 订阅地址的端口 (0=跟随 sub_host 或请求; 反代到 443 时很有用)
     "sub_path": "sub",         # 订阅路径 (如 sub → /sub/<token>; 改后旧订阅地址失效)
 }
 

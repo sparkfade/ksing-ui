@@ -33,7 +33,16 @@ AnyTLS 中控面板：纯官方 sing-box 裸核节点 + 集中配置下发 + v2r
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sparkfade/ksing-ui/main/install_panel.sh | sudo bash
-# 或自定义端口: sudo bash install_panel.sh 8080 9443
+# 或自定义端口: sudo bash install_panel.sh install 8080 9443
+```
+
+面板日常管理（升级/重启/状态/卸载，已安装时重复执行 install 会拒绝以防覆盖）:
+
+```bash
+bash /opt/ksing-ui/install_panel.sh upgrade    # 拉最新代码并重启 (--with-binaries 同时重构节点内核)
+bash /opt/ksing-ui/install_panel.sh restart
+bash /opt/ksing-ui/install_panel.sh status
+bash /opt/ksing-ui/install_panel.sh uninstall  # [--purge 连数据一起删]
 ```
 
 手动安装则：

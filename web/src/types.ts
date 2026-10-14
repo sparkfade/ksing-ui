@@ -157,6 +157,7 @@ export interface Settings {
   agent_port: number
   sub_host: string
   sub_path: string
+  sub_port?: number
   admin_user: string
 }
 

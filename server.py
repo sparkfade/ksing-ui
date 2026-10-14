@@ -216,19 +216,6 @@ def touch_server(sid, **fields):
         sbtool.save_servers(BASE, servers)
 
 
-def _valid_host(host):
-    return bool(re.fullmatch(r"[A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\]", host or ""))
-
-
-def request_host(ctx_headers):
-    """取请求的 Host(校验白名单, 防 Host 头注入); 非法时回退 settings.host"""
-    host = (ctx_headers.get("Host", "") or "").split(":")[0].strip()
-    if _valid_host(host):
-        return host
-    s = sbtool.get_settings(BASE)
-    return s.get("host") or "127.0.0.1"
-
-
 def install_script_hash():
     with open(os.path.join(ROOT, "install_node.sh"), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -366,12 +353,53 @@ def call_sbtool(fn, *args, **kwargs):
         raise ApiError(msg)
 
 
-def sub_base(s, req_host="", scheme="http"):
-    """订阅地址的对外 base: 优先自定义 sub_host (可带端口), 其次 host 设置, 最后请求 Host"""
-    if s.get("sub_host"):
-        return "%s://%s" % (scheme, s["sub_host"].rstrip("/"))
-    host = s.get("host") or req_host
-    return "%s://%s:%s" % (scheme, host, s.get("panel_port", 8080))
+def split_host_port(h):
+    """拆 host[:port], 支持 [v6]:port; 返回 (host, port或None)"""
+    h = (h or "").strip()
+    if h.startswith("["):
+        m = re.match(r"^\[[0-9a-fA-F:]+\](?::(\d+))?$", h)
+        return (h, int(m.group(1)) if m and m.group(1) else None) if m else ("", None)
+    m = re.match(r"^([A-Za-z0-9.\-]+)(?::(\d+))?$", h)
+    if not m:
+        return "", None
+    return m.group(1), int(m.group(2)) if m.group(2) else None
+
+
+def request_host_port(headers):
+    """请求的 Host 整串 (含端口), 校验后返回; 非法返回空"""
+    h = (headers.get("Host", "") or "").strip()
+    host, _ = split_host_port(h)
+    return h if host else ""
+
+
+def request_host(ctx_headers):
+    """取请求的 Host 主机名 (校验白名单, 防 Host 头注入); 非法时回退 settings.host"""
+    host, _ = split_host_port(ctx_headers.get("Host", "") or "")
+    if host:
+        return host
+    s = sbtool.get_settings(BASE)
+    h, _ = split_host_port(s.get("host") or "")
+    return h or "127.0.0.1"
+
+
+def sub_base(s, req_hostport="", scheme="http"):
+    """订阅地址的对外 base。
+    优先自定义 sub_host[:port]; 其次 host 设置; 默认跟随请求 Host (含反代后的对外端口)。
+    sub_port 非 0 时强制覆盖端口。"""
+    panel_port = int(s.get("panel_port") or 8080)
+    sub_port = int(s.get("sub_port") or 0)
+    if s.get("sub_host") or s.get("host"):
+        raw = s.get("sub_host") or s.get("host")
+        host, port = split_host_port(raw)
+        port = sub_port or port or panel_port
+    else:
+        host, port = split_host_port(req_hostport)
+        if not host:
+            host, port = "127.0.0.1", panel_port
+        port = sub_port or port  # 跟随请求 Host 的端口 (反代友好); Host 无端口则省略
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        return "%s://%s:%d" % (scheme, host, port)
+    return "%s://%s" % (scheme, host)
 
 
 def sub_url_for(s, token, req_host="", scheme="http"):
@@ -612,7 +640,7 @@ def h_nodes_import(ctx):
 def h_users_list(ctx):
     s = sbtool.get_settings(BASE)
     users = sbtool.load_users(BASE)
-    host = request_host(ctx.headers)
+    host = request_host_port(ctx.headers)
     scheme = "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http"
     return 200, [user_view(n, u, s, host, scheme) for n, u in users.items()]
 
@@ -868,7 +896,7 @@ def h_ruleset_sources(ctx):
 SETTINGS_EDITABLE = ("final", "host", "sni",
                      "private_action", "auto_detect_interface", "log_level",
                      "panel_listen", "panel_port", "agent_listen", "agent_port",
-                     "sub_host", "sub_path")
+                     "sub_host", "sub_port", "sub_path")
 
 def h_settings_get(ctx):
     s = sbtool.get_settings(BASE)
@@ -888,6 +916,10 @@ def h_settings_put(ctx):
                 v = int(v)
                 if not (1 <= v <= 65535):
                     raise ApiError("端口非法")
+            if k == "sub_port":
+                v = int(v or 0)
+                if not (0 <= v <= 65535):
+                    raise ApiError("订阅端口非法")
             if k == "auto_detect_interface":
                 v = bool(v)
             if k == "private_action" and v not in ("reject", "direct", "off"):
@@ -1351,7 +1383,7 @@ def h_me(ctx):
     if not u:
         raise ApiError("用户不存在", 404)
     s = sbtool.get_settings(BASE)
-    host = request_host(ctx.headers)
+    host = request_host_port(ctx.headers)
     scheme = "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http"
     v = user_view(name, u, s, host, scheme)
     # 我的出口信息
@@ -1394,7 +1426,7 @@ def h_me_refresh_token(ctx):
     u["token"] = sbtool.gen_token()
     sbtool.save_users(BASE, users)
     s = sbtool.get_settings(BASE)
-    host = ctx.headers.get("Host", "").split(":")[0]
+    host = request_host_port(ctx.headers)
     scheme = "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http"
     v = user_view(name, u, s, host, scheme)
     return 200, {"ok": True, "token": u["token"], "sub_url": v["sub_url"]}
@@ -1715,7 +1747,7 @@ def handle_sub(handler, token):
         return
     name, u = found
     s = sbtool.get_settings(BASE)
-    req_host = request_host(handler.headers)
+    req_host = request_host_port(handler.headers)
     scheme = "https" if handler.headers.get("X-Forwarded-Proto") == "https" else "http"
     v = user_view(name, u, s, req_host, scheme)
     accept = handler.headers.get("Accept", "")
