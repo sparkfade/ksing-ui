@@ -33,6 +33,13 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# C/POSIX locale 的主机 stdout 是 latin-1, 中文输出会崩; 强制 UTF-8
+for _f in (sys.stdout, sys.stderr):
+    try:
+        _f.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sbtool  # noqa: E402
 

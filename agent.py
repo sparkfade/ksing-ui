@@ -27,7 +27,14 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.1.0"
+# 服务器常见 C/POSIX locale 会把 stdout 切成 latin-1, 中文日志会崩; 强制 UTF-8
+for _f in (sys.stdout, sys.stderr):
+    try:
+        _f.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+VERSION = "1.1.1"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
