@@ -32,8 +32,9 @@ python3 "$APP_DIR/sbtool.py" --dir "$DATA_DIR" set --panel-listen :: --panel-por
 echo "[3/4] 构建节点用 sing-box 二进制 (官方源码 + with_v2ray_api) ..."
 if [ -x "$DATA_DIR/bin/sing-box-linux-amd64" ]; then
   echo "  已存在, 跳过 (重新构建: bash $APP_DIR/tools/build_node_binary.sh $DATA_DIR/bin)"
-else
-  bash "$APP_DIR/tools/build_node_binary.sh" "$DATA_DIR/bin"
+elif ! bash "$APP_DIR/tools/build_node_binary.sh" "$DATA_DIR/bin"; then
+  echo "  !! 二进制构建失败(多半是磁盘/网络不足)。面板本身可正常用," >&2
+  echo "     但节点安装命令下载内核会 404。请在别的机器构建后上传到 $DATA_DIR/bin/ 再重试。" >&2
 fi
 
 echo "[4/4] 注册并启动 systemd 服务 ..."
