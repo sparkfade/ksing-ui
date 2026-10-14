@@ -10,7 +10,6 @@ venv/
 
 # 前端
 web/node_modules/
-web/dist/
 web/*.local
 
 # sing-box 源码子仓
