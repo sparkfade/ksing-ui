@@ -1,0 +1,201 @@
+<template>
+  <div>
+    <div class="page-head">
+      <h2>设置</h2>
+    </div>
+
+    <Spinner v-if="loading" />
+
+    <template v-else>
+      <div class="card">
+        <h3 class="card-title">服务器设置</h3>
+        <div class="form-grid">
+          <Input v-model="form.host" label="服务器地址 host" hint="用于订阅链接" placeholder="example.com" />
+          <Input v-model="form.sni" label="自签伪装 SNI (可选)" hint="仅自签/IP 证书模式的节点使用, 域名证书节点的 SNI 就是其域名" placeholder="www.apple.com" />
+          <Select v-model="form.final" label="默认出站" :options="finalOptions" />
+          <Select v-model="form.private_action" label="私网地址处理" :options="[
+            { label: 'reject 拒绝', value: 'reject' },
+            { label: 'direct 直连', value: 'direct' },
+            { label: 'off 不处理', value: 'off' },
+          ]" />
+          <Select v-model="form.log_level" label="日志级别" :options="LOG_LEVELS" />
+          <div class="field-row">
+            <Toggle v-model="form.auto_detect_interface" label="自动检测出口网卡" />
+          </div>
+          <Input v-model="form.panel_listen" label="面板监听地址" placeholder=":: / 127.0.0.1" />
+          <Input v-model.number="form.panel_port" label="面板端口" hint="修改后需重启面板进程生效" type="number" />
+        </div>
+        <div class="row" style="margin-top: 18px; justify-content: flex-end">
+          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">节点下发</h3>
+        <p class="muted" style="margin: -4px 0 14px; font-size: 12.5px">
+          服务器节点 agent 接入参数，修改后需重启面板进程生效。
+        </p>
+        <div class="form-grid">
+          <Input v-model.number="form.agent_port" label="Agent 端口" hint="修改后需重启面板进程生效" type="number" />
+          <Input v-model="form.agent_listen" label="Agent 监听地址" hint="修改后需重启面板进程生效" placeholder=":: / 0.0.0.0" />
+        </div>
+        <div class="row" style="margin-top: 18px; justify-content: flex-end">
+          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">订阅发布</h3>
+        <div class="form-grid">
+          <Input v-model="form.sub_host" label="订阅地址 host" hint="留空跟随访问地址" placeholder="sub.example.com 或 1.2.3.4:8080" />
+          <Input v-model="form.sub_path" label="订阅路径" hint="默认 sub" placeholder="sub" />
+        </div>
+        <p class="muted" style="margin: 12px 0 0; font-size: 12.5px">
+          修改路径后旧订阅地址立即失效；配合用户页的重置订阅可快速换发。
+        </p>
+        <div class="row" style="margin-top: 18px; justify-content: flex-end">
+          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">管理员账号</h3>
+        <div class="form-grid">
+          <Input v-model="adminForm.old_password" label="原密码" type="password" placeholder="必填" />
+          <Input v-model="adminForm.new_username" label="新用户名" placeholder="留空则不修改" />
+          <Input v-model="adminForm.new_password" label="新密码" hint="至少 6 位" type="password" placeholder="留空则不修改" />
+        </div>
+        <div class="row" style="margin-top: 18px; justify-content: flex-end">
+          <Button variant="primary" :loading="savingAdmin" @click="saveAdmin">修改凭据</Button>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from 'vue'
+import Button from '@/component/ui/Button.vue'
+import Input from '@/component/ui/Input.vue'
+import Select from '@/component/ui/Select.vue'
+import Spinner from '@/component/ui/Spinner.vue'
+import Toggle from '@/component/ui/Toggle.vue'
+import { get, post, put } from '@/util/request'
+import { toast } from '@/util/toast'
+import { auth, login } from '@/util/auth'
+import { LOG_LEVELS, type NodeInfo, type Settings } from '@/types'
+
+const loading = ref(true)
+const saving = ref(false)
+const savingAdmin = ref(false)
+const nodeTags = ref<string[]>([])
+
+const form = reactive({
+  host: '',
+  sni: '',
+  final: 'direct',
+  private_action: 'reject',
+  auto_detect_interface: true,
+  log_level: 'info',
+  panel_listen: '',
+  panel_port: 8080,
+  agent_listen: '',
+  agent_port: 9443,
+  sub_host: '',
+  sub_path: 'sub',
+})
+
+const adminForm = reactive({
+  old_password: '',
+  new_username: '',
+  new_password: '',
+})
+
+const finalOptions = computed(() => [
+  { label: 'direct 直连', value: 'direct' },
+  { label: 'reject 拒绝', value: 'reject' },
+  ...nodeTags.value.map((t) => ({ label: `节点: ${t}`, value: t })),
+])
+
+async function load() {
+  loading.value = true
+  try {
+    const [s, nd] = await Promise.all([
+      get<Settings>('/api/settings'),
+      get<Record<string, NodeInfo>>('/api/nodes'),
+    ])
+    Object.assign(form, {
+      host: s.host ?? '',
+      sni: s.sni ?? '',
+      final: s.final || 'direct',
+      private_action: s.private_action || 'reject',
+      auto_detect_interface: !!s.auto_detect_interface,
+      log_level: s.log_level || 'info',
+      panel_listen: s.panel_listen ?? '',
+      panel_port: s.panel_port,
+      agent_listen: s.agent_listen ?? '',
+      agent_port: s.agent_port ?? 9443,
+      sub_host: s.sub_host ?? '',
+      sub_path: s.sub_path || 'sub',
+    })
+    adminForm.new_username = s.admin_user
+    nodeTags.value = Object.keys(nd).sort()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function save() {
+  saving.value = true
+  try {
+    await put('/api/settings', {
+      ...form,
+      panel_port: Number(form.panel_port),
+      agent_port: Number(form.agent_port),
+    })
+    toast('设置已保存，已自动下发到相关节点', 'success')
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveAdmin() {
+  if (!adminForm.old_password) {
+    toast('请输入原密码', 'error')
+    return
+  }
+  if (adminForm.new_password && adminForm.new_password.length < 6) {
+    toast('新密码至少 6 位', 'error')
+    return
+  }
+  savingAdmin.value = true
+  try {
+    const body: Record<string, string> = { old_password: adminForm.old_password }
+    if (adminForm.new_password) body.new_password = adminForm.new_password
+    if (adminForm.new_username.trim()) body.new_username = adminForm.new_username.trim()
+    const r = await post<{ ok: boolean; token?: string; name?: string }>('/api/settings/admin', body)
+    if (r.token) login(r.token, 'admin', r.name || auth.name) // 凭据变更后旧令牌失效, 换新令牌
+    toast('管理员凭据已更新', 'success')
+    adminForm.old_password = ''
+    adminForm.new_password = ''
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    savingAdmin.value = false
+  }
+}
+
+onMounted(load)
+</script>
+
+<style scoped>
+.field-row {
+  display: flex;
+  align-items: flex-end;
+  padding-bottom: 8px;
+}
+</style>

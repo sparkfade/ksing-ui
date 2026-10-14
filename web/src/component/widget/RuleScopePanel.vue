@@ -1,0 +1,231 @@
+<template>
+  <div>
+    <Spinner v-if="loading" />
+    <Empty v-else-if="!scopedRules.length" text="暂无专属规则" />
+    <div v-else class="rule-list">
+      <div v-for="{ rule: r, index } in scopedRules" :key="index" class="rule-row">
+        <div class="rule-cond">
+          <span v-for="s in r.rule_set" :key="'s' + s" class="chip purple">{{ s }}</span>
+          <span v-for="u in r.users" :key="'u' + u" class="chip green">{{ u }}</span>
+          <span v-for="n in r.nodes" :key="'n' + n" class="chip">⛁ {{ serverName(n) }}</span>
+          <span v-for="t in condText(r)" :key="t" class="chip">{{ t }}</span>
+          <span v-if="!r.rule_set?.length && !condText(r).length" class="muted">全部流量</span>
+        </div>
+        <Badge v-if="r.action === 'reject'" color="red">拒绝</Badge>
+        <Badge v-else :color="r.outbound === 'direct' ? 'dim' : 'cyan'">{{ r.outbound }}</Badge>
+        <Button small variant="danger" @click="delRule(index)">删除</Button>
+      </div>
+    </div>
+
+    <h4 class="add-title">添加规则</h4>
+    <div class="form-grid">
+      <div class="fw">
+        <MultiSelect v-model="form.rule_set" :options="rulesetTags" label="规则集" hint="不选 = 不匹配规则集" />
+      </div>
+      <Input v-model="form.domain" label="域名" hint="逗号分隔" placeholder="example.com, google.com" />
+      <Input v-model="form.domain_suffix" label="域名后缀" hint="逗号分隔" placeholder="google.com" />
+      <Input v-model="form.domain_keyword" label="域名关键字" hint="逗号分隔" placeholder="google" />
+      <Input v-model="form.domain_regex" label="域名正则" hint="逗号分隔" placeholder="^.*\.google\..*$" />
+      <Input v-model="form.ip_cidr" label="IP CIDR" hint="逗号分隔" placeholder="91.108.0.0/16" />
+      <Input v-model="form.port" label="端口" hint="逗号分隔数字" placeholder="80, 443" />
+      <Select v-model="form.outbound" label="出站" :options="outboundOptions" :disabled="form.reject" />
+      <div class="field-row">
+        <Toggle v-model="form.reject" label="拒绝该流量 (reject)" />
+      </div>
+    </div>
+    <div class="row" style="margin-top: 14px; justify-content: flex-end">
+      <Button variant="primary" :loading="saving" @click="addRule">添加规则</Button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from 'vue'
+import Badge from '@/component/ui/Badge.vue'
+import Button from '@/component/ui/Button.vue'
+import Empty from '@/component/ui/Empty.vue'
+import Input from '@/component/ui/Input.vue'
+import MultiSelect from '@/component/ui/MultiSelect.vue'
+import Select from '@/component/ui/Select.vue'
+import Spinner from '@/component/ui/Spinner.vue'
+import Toggle from '@/component/ui/Toggle.vue'
+import { del as httpDel, get, post } from '@/util/request'
+import { confirmDialog } from '@/util/confirm'
+import { toast } from '@/util/toast'
+import type { NodeInfo, RouteRule, RoutesData, RulesetItem, ServerItem } from '@/types'
+
+const props = defineProps<{
+  nodeSid?: string
+  userName?: string
+}>()
+
+const rules = ref<RouteRule[]>([])
+const nodeTags = ref<string[]>([])
+const rulesetTags = ref<string[]>([])
+const servers = ref<ServerItem[]>([])
+const loading = ref(true)
+const saving = ref(false)
+
+const form = reactive({
+  rule_set: [] as string[],
+  domain: '',
+  domain_suffix: '',
+  domain_keyword: '',
+  domain_regex: '',
+  ip_cidr: '',
+  port: '',
+  outbound: 'direct',
+  reject: false,
+})
+
+const scopedRules = computed(() =>
+  rules.value
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) => {
+      if (props.nodeSid) return rule.nodes?.includes(props.nodeSid) && !rule.users?.length
+      if (props.userName) return rule.users?.includes(props.userName)
+      return false
+    }),
+)
+
+const outboundOptions = computed(() => [
+  { label: 'direct 直连', value: 'direct' },
+  ...nodeTags.value.map((t) => ({ label: `节点: ${t}`, value: t })),
+])
+
+function serverName(sid: string): string {
+  return servers.value.find((s) => s.sid === sid)?.name ?? sid
+}
+
+function condText(r: RouteRule): string[] {
+  const out: string[] = []
+  const push = (label: string, vals?: Array<string | number>) => {
+    if (vals?.length) out.push(`${label}: ${vals.join(', ')}`)
+  }
+  push('domain', r.domain)
+  push('suffix', r.domain_suffix)
+  push('keyword', r.domain_keyword)
+  push('regex', r.domain_regex)
+  push('ip', r.ip_cidr)
+  push('port', r.port)
+  return out
+}
+
+async function load() {
+  loading.value = true
+  try {
+    const [rc, nd, rs, sv] = await Promise.all([
+      get<RoutesData>('/api/routes'),
+      get<Record<string, NodeInfo>>('/api/nodes'),
+      get<{ total: number; results: RulesetItem[] }>('/api/rulesets'),
+      get<ServerItem[]>('/api/servers'),
+    ])
+    rules.value = rc.rules
+    nodeTags.value = Object.keys(nd).sort()
+    rulesetTags.value = rs.results.map((x) => x.tag)
+    servers.value = sv
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+function splitCsv(text: string): string[] {
+  return text.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+}
+
+async function addRule() {
+  const body: Record<string, unknown> = {}
+  if (form.rule_set.length) body.rule_set = form.rule_set
+  for (const k of ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'ip_cidr'] as const) {
+    const vals = splitCsv(form[k])
+    if (vals.length) body[k] = vals
+  }
+  if (form.port.trim()) {
+    const ports = splitCsv(form.port).map(Number)
+    if (ports.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) {
+      toast('端口格式错误', 'error')
+      return
+    }
+    body.port = ports
+  }
+  if (props.userName) body.users = [props.userName]
+  if (props.nodeSid) body.nodes = [props.nodeSid]
+  if (form.reject) body.action = 'reject'
+  else body.outbound = form.outbound
+
+  saving.value = true
+  try {
+    await post('/api/routes', body)
+    toast('规则已添加，已自动下发到相关节点', 'success')
+    Object.assign(form, {
+      rule_set: [],
+      domain: '',
+      domain_suffix: '',
+      domain_keyword: '',
+      domain_regex: '',
+      ip_cidr: '',
+      port: '',
+      outbound: 'direct',
+      reject: false,
+    })
+    load()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function delRule(index: number) {
+  if (!(await confirmDialog(`确定删除第 ${index + 1} 条规则？`))) return
+  try {
+    await httpDel(`/api/routes/${index}`)
+    toast('已删除，已自动下发到相关节点', 'success')
+    load()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  }
+}
+
+onMounted(load)
+</script>
+
+<style scoped>
+.rule-list {
+  margin-bottom: 4px;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--c-border);
+}
+
+.rule-cond {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+}
+
+.add-title {
+  margin: 18px 0 12px;
+  font-size: 13.5px;
+  color: var(--c-text-dim);
+  border-top: 1px solid var(--c-border);
+  padding-top: 16px;
+}
+
+.fw {
+  grid-column: 1 / -1;
+}
+
+.field-row {
+  display: flex;
+  align-items: flex-end;
+  padding-bottom: 8px;
+}
+</style>

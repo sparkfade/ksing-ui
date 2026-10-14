@@ -1,0 +1,28 @@
+# 数据目录: 含用户密码/订阅token/管理员凭据/生成的配置/证书缓存/日志
+sbdata/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 前端
+web/node_modules/
+web/dist/
+web/*.local
+
+# sing-box 源码子仓
+sing-box/
+
+# 参考项目 (仅本地参考, 不入库)
+node/
+sub3/
+3x-ui/
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store
+*.log

@@ -1,0 +1,417 @@
+{
+
+  "log": {
+
+    "level": "info"
+
+  },
+
+  "experimental": {
+
+    "cache_file": {
+
+      "enabled": true,
+
+      "store_dns": true
+
+    }
+
+  },
+
+  "dns": {
+
+    "servers": [
+
+      {
+
+        "type": "https",
+
+        "tag": "local",
+
+        "server": "223.6.6.6",
+
+        "server_port": 443,
+
+        "path": "/dns-query",
+
+        "tls": {
+
+          "enabled": true,
+
+          "server_name": "dns.alidns.com"
+
+        }
+
+      },
+
+      {
+
+        "type": "https",
+
+        "tag": "remote",
+
+        "server": "1.1.1.1",
+
+        "path": "/dns-query",
+
+        "tls": {
+
+          "enabled": true,
+
+          "server_name": "cloudflare-dns.com"
+
+        },
+
+        "detour": "selector"
+
+      },
+
+      {
+
+        "type": "https",
+
+        "tag": "remote-us",
+
+        "server": "8.8.8.8",
+
+        "path": "/dns-query",
+
+        "tls": {
+
+          "enabled": true,
+
+          "server_name": "dns.google"
+
+        },
+
+        "detour": "selector"
+
+      }
+
+    ],
+
+    "rules": [
+
+      {
+
+        "action": "route",
+
+        "domain_suffix": [
+
+          ".ts.net"
+
+        ],
+
+        "server": "tailscale"
+
+      },
+
+      {
+
+        "action": "route",
+
+        "rule_set": "geosite-google",
+
+        "server": "remote-us"
+
+      },
+
+      {
+
+        "action": "route",
+
+        "rule_set": "geosite-cn",
+
+        "server": "local"
+
+      },
+
+      {
+
+        "action": "route",
+
+        "rule_set": "ext-cn-domain",
+
+        "server": "local"
+
+      }
+
+    ],
+
+    "final": "remote",
+
+    "strategy": "prefer_ipv4",
+
+    "optimistic": {
+
+      "enabled": true,
+
+      "timeout": "10m"
+
+    }
+
+  },
+
+  "http_clients": [
+
+    {
+
+      "tag": "rule-set-downloader",
+
+      "detour": "selector"
+
+    }
+
+  ],
+
+  "inbounds": [],
+
+  "outbounds": [
+
+    {
+
+      "password": "",
+
+      "server": "ip",
+
+      "server_port": 443,
+
+      "tag": "hk-xxx",
+
+      "tls": {
+
+        "enabled": true,
+
+        "server_name": "对应域名",
+
+        "insecure": false
+
+      },
+
+      "type": "anytls"
+
+    },
+
+    {
+
+      "password": "",
+
+      "server": "ip",
+
+      "server_port": 443,
+
+      "tag": "us-xxx",
+
+      "tls": {
+
+        "enabled": true,
+
+        "server_name": "对应域名",
+
+        "insecure": false //除非是自签证书，否则一律false
+
+      },
+
+      "type": "anytls"
+
+    },
+
+    {
+
+      "type": "direct",
+
+      "tag": "direct"
+
+    }
+
+  ],
+
+  "route": {
+
+    "auto_detect_interface": true,
+
+    "default_domain_resolver": {
+
+      "server": "local"
+
+    },
+
+    "default_http_client": "rule-set-downloader",
+
+    "rule_set": [
+
+      {
+
+        "format": "binary",
+
+        "tag": "geoip-cn",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+
+      },
+
+      {
+
+        "format": "binary",
+
+        "tag": "geosite-cn",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"
+
+      },
+
+      {
+
+        "format": "binary",
+
+        "tag": "ext-cn-domain",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/xmdhs/cn-domain-list/rule-set/ext-cn-list.srs"
+
+      },
+
+      {
+
+        "format": "binary",
+
+        "tag": "geosite-!cn",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
+
+      },
+
+      {
+
+        "format": "binary",
+
+        "tag": "geosite-google",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs"
+
+      },
+
+      {
+
+        "format": "binary",
+
+        "tag": "geoip-google",
+
+        "type": "remote",
+
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs"
+
+      }
+
+    ],
+
+    "rules": [
+
+      {
+
+        "action": "sniff"
+
+      },
+
+      {
+
+        "protocol": "dns",
+
+        "action": "hijack-dns"
+
+      },
+
+      {
+
+        "ip_is_private": true,
+
+        "action": "route",
+
+        "outbound": "direct"
+
+      },
+
+      {
+
+        "rule_set": "geosite-cn",
+
+        "action": "route",
+
+        "outbound": "direct"
+
+      },
+
+      {
+
+        "rule_set": "ext-cn-domain",
+
+        "action": "route",
+
+        "outbound": "direct"
+
+      },
+
+      {
+
+        "rule_set": "geosite-!cn",
+
+        "action": "route",
+
+        "outbound": "urltest"
+
+      },
+
+      {
+
+        "action": "resolve",
+
+        "strategy": "prefer_ipv4"
+
+      },
+
+      {
+
+        "type": "logical",
+
+        "mode": "and",
+
+        "rules": [
+
+          {
+
+            "rule_set": "geoip-cn"
+
+          },
+
+          {
+
+            "rule_set": "geosite-!cn",
+
+            "invert": true
+
+          }
+
+        ],
+
+        "action": "route",
+
+        "outbound": "direct"
+
+      }
+
+    ],
+
+    "final": "urltest"
+
+  }
+
+}

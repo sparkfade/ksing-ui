@@ -1,0 +1,221 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_dns": true
+    }
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "remote",
+        "server": "1.1.1.1",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "cloudflare-dns.com"
+        },
+        "detour": "direct-out"
+      },
+      {
+        "type": "https",
+        "tag": "remote-us",
+        "server": "8.8.8.8",
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "dns.google"
+        },
+        "detour": "direct-out"
+      }
+    ],
+    "rules": [
+      {
+        "action": "route",
+        "rule_set": "geosite-google",
+        "server": "remote-us"
+      },
+      {
+        "action": "route",
+        "rule_set": "geosite-cn",
+        "server": "local"
+      },
+      {
+        "action": "route",
+        "rule_set": "ext-cn-domain",
+        "server": "local"
+      }
+    ],
+    "final": "remote",
+    "strategy": "prefer_ipv4",
+    "optimistic": {
+      "enabled": true,
+      "timeout": "10m"
+    }
+  },
+  "http_clients": [
+    {
+      "tag": "rule-set-downloader",
+      "detour": "direct-out"
+    }
+  ],
+  "inbounds": [
+    {
+        "type": "anytls",
+        "tag": "anytls-in",
+        "listen": "::",
+        "listen_port": PORT,
+        "users": [
+            {
+                "name": "user1",
+                "password": "password1"
+            },
+	    {
+		"name": "user2",
+		"password": "password2"
+	    }
+        ],
+        "padding_scheme": [
+            "stop=6",
+            "1=250-650",
+            "2=280-650,c,130-450",
+            "3=150-300",
+            "4=320-800",
+            "5=450-900,c,300-550"
+        ],
+        "tls": {
+            "enabled": true,
+            "certificate_path": "/data/test.example.com/fullchain.cer",
+            "key_path": "/data/test.example.com/cert.key"
+        }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "xxx-out",
+      "server": "1.2.3.4",
+      "server_port": PORT,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "password",
+      "udp_over_tcp" true
+    },	
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "local"
+    },
+    "default_http_client": "rule-set-downloader",
+    "rule_set": [
+      {
+        "format": "binary",
+        "tag": "geoip-cn",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+      },
+      {
+        "format": "binary",
+        "tag": "geosite-cn",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"
+      },
+      {
+        "format": "binary",
+        "tag": "ext-cn-domain",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/xmdhs/cn-domain-list/rule-set/ext-cn-list.srs"
+      },
+      {
+        "format": "binary",
+        "tag": "geosite-!cn",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
+      },
+      {
+        "format": "binary",
+        "tag": "geosite-google",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs"
+      },
+      {
+        "format": "binary",
+        "tag": "geoip-google",
+        "type": "remote",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "geosite-google",
+          "geoip-google"
+        ],
+        "action": "route",
+        "outbound": "google-out"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "action": "route",
+        "outbound": "block"
+      },
+      {
+        "rule_set": "ext-cn-domain",
+        "action": "route",
+        "outbound": "block"
+      },
+      {
+        "rule_set": "geosite-!cn",
+        "action": "route",
+        "outbound": "direct-out"
+      },
+      {
+        "domain_suffix": [
+          ".onion"
+        ],
+        "action": "route",
+        "outbound": "tor-out"
+      },
+      {
+        "action": "resolve",
+        "strategy": "prefer_ipv4"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geoip-cn"
+          },
+          {
+            "rule_set": "geosite-!cn",
+            "invert": true
+          }
+        ],
+        "action": "route",
+        "outbound": "block"
+      }
+    ],
+    "final": "direct-out"
+  }
+}

@@ -1,0 +1,295 @@
+:root {
+  --c-primary: #4cc2ff;
+  --c-primary-dark: #2a9fd8;
+  --c-on-primary: #08131b;
+  --c-bg: #0f1115;
+  --c-card: #171a21;
+  --c-card-2: #1c202a;
+  --c-border: #262b36;
+  --c-text: #e2e6ee;
+  --c-text-dim: #8a93a6;
+  --c-red: #ff6b6b;
+  --c-green: #43d9a3;
+  --c-yellow: #f5c56b;
+  --c-purple: #b48cff;
+
+  /* 语义软色（徽章/chip/提示条底与边） */
+  --c-primary-soft: rgba(76, 194, 255, 0.1);
+  --c-primary-bd: rgba(76, 194, 255, 0.25);
+  --c-green-soft: rgba(67, 217, 163, 0.1);
+  --c-green-bd: rgba(67, 217, 163, 0.25);
+  --c-red-soft: rgba(255, 107, 107, 0.1);
+  --c-red-bd: rgba(255, 107, 107, 0.3);
+  --c-yellow-soft: rgba(245, 197, 107, 0.08);
+  --c-yellow-bd: rgba(245, 197, 107, 0.3);
+  --c-purple-soft: rgba(180, 140, 255, 0.1);
+  --c-purple-bd: rgba(180, 140, 255, 0.25);
+  --c-dim-soft: rgba(138, 147, 166, 0.1);
+
+  --c-hover: rgba(255, 255, 255, 0.03);
+  --c-hover-2: rgba(255, 255, 255, 0.06);
+  --c-overlay: rgba(0, 0, 0, 0.55);
+  --c-glow: rgba(76, 194, 255, 0.06);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 10px rgba(0, 0, 0, 0.16);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-btn: 0 3px 12px rgba(76, 194, 255, 0.28);
+
+  --radius: 10px;
+  --font: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+  --mono: 'SF Mono', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+}
+
+[data-theme='light'] {
+  --c-primary: #1f9de8;
+  --c-primary-dark: #1580c0;
+  --c-on-primary: #ffffff;
+  --c-bg: #f6f7f9;
+  --c-card: #ffffff;
+  --c-card-2: #eef1f5;
+  --c-border: #e3e7ee;
+  --c-text: #2a303c;
+  --c-text-dim: #6b7383;
+  --c-red: #e05260;
+  --c-green: #22a67c;
+  --c-yellow: #c98d1e;
+  --c-purple: #8a63e8;
+
+  --c-primary-soft: rgba(31, 157, 232, 0.1);
+  --c-primary-bd: rgba(31, 157, 232, 0.3);
+  --c-green-soft: rgba(34, 166, 124, 0.1);
+  --c-green-bd: rgba(34, 166, 124, 0.3);
+  --c-red-soft: rgba(224, 82, 96, 0.08);
+  --c-red-bd: rgba(224, 82, 96, 0.3);
+  --c-yellow-soft: rgba(201, 141, 30, 0.1);
+  --c-yellow-bd: rgba(201, 141, 30, 0.35);
+  --c-purple-soft: rgba(138, 99, 232, 0.1);
+  --c-purple-bd: rgba(138, 99, 232, 0.3);
+  --c-dim-soft: rgba(107, 115, 131, 0.12);
+
+  --c-hover: rgba(30, 50, 80, 0.05);
+  --c-hover-2: rgba(30, 50, 80, 0.08);
+  --c-overlay: rgba(30, 40, 60, 0.45);
+  --c-glow: rgba(31, 157, 232, 0.08);
+
+  --shadow-card: 0 1px 2px rgba(30, 50, 80, 0.05), 0 4px 16px rgba(30, 50, 80, 0.06);
+  --shadow-pop: 0 12px 40px rgba(30, 50, 80, 0.2);
+  --shadow-btn: 0 3px 12px rgba(31, 157, 232, 0.32);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+a {
+  color: var(--c-primary);
+  text-decoration: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--c-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 通用卡片与排版 ─────────────────────────── */
+
+.card {
+  background: var(--c-card);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-card);
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card + .card {
+  margin-top: 16px;
+}
+
+.card-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.muted {
+  color: var(--c-text-dim);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.page-head h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+/* ── 表格 ────────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.tbl th,
+.tbl td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--c-border);
+  white-space: nowrap;
+}
+
+.tbl th {
+  color: var(--c-text-dim);
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+.tbl tbody tr {
+  transition: background-color 0.12s ease;
+}
+
+.tbl tbody tr:hover {
+  background: var(--c-hover);
+}
+
+.tbl tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tbl td .row {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* ── 信息行 ────────────────────────────────── */
+
+.kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--c-border);
+}
+
+.kv:last-child {
+  border-bottom: none;
+}
+
+.kv .k {
+  color: var(--c-text-dim);
+  flex-shrink: 0;
+}
+
+.kv .v {
+  text-align: right;
+  word-break: break-all;
+}
+
+/* ── chip ─────────────────────────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 12px;
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+  border: 1px solid var(--c-primary-bd);
+  margin: 2px 4px 2px 0;
+}
+
+.chip.green {
+  background: var(--c-green-soft);
+  color: var(--c-green);
+  border-color: var(--c-green-bd);
+}
+
+.chip.purple {
+  background: var(--c-purple-soft);
+  color: var(--c-purple);
+  border-color: var(--c-purple-bd);
+}
+
+.chip .x {
+  cursor: pointer;
+  opacity: 0.7;
+  font-weight: 700;
+}
+
+.chip .x:hover {
+  opacity: 1;
+}
+
+/* ── 表单网格 ────────────────────────────────── */
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px 16px;
+}
+
+.tip-bar {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--c-yellow-soft);
+  border: 1px solid var(--c-yellow-bd);
+  color: var(--c-yellow);
+  margin-bottom: 16px;
+}
