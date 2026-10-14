@@ -9,7 +9,6 @@ OUT="$(cd "$OUT" && pwd)"
 SB_VERSION="${SB_VERSION:-v1.14.3}"
 GO_VERSION="${GO_VERSION:-1.27.2}"
 WORK=/tmp/ksing-build
-TAGS="with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0,with_v2ray_api"
 VER="${SB_VERSION#v}-ksing"
 
 mkdir -p "$WORK"
@@ -40,6 +39,9 @@ else
 fi
 
 cd "$WORK/sing-box"
+# 用该版本仓库自带的官方构建 tags (去掉需要 CGO 的 naive), 再加 with_v2ray_api
+TAGS="$(sed 's/with_naive_outbound,//; s/,,*/,/g; s/,$//; s/^,//' release/DEFAULT_BUILD_TAGS),with_v2ray_api"
+echo "构建 tags: $TAGS"
 export CGO_ENABLED=0
 for arch in amd64 arm64; do
   echo "构建 linux/$arch ..."
