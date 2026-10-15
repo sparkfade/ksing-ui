@@ -10,10 +10,9 @@
       <div class="card">
         <h3 class="card-title">服务器设置</h3>
         <div class="form-grid">
-          <Input v-model="form.host" label="服务器地址 host" hint="用于订阅链接" placeholder="example.com" />
           <Input v-model="form.sni" label="自签伪装 SNI (可选)" hint="仅自签/IP 证书模式的节点使用, 域名证书节点的 SNI 就是其域名" placeholder="www.apple.com" />
-          <Select v-model="form.final" label="默认出站" :options="finalOptions" />
-          <Select v-model="form.private_action" label="私网地址处理" :options="[
+          <Select v-model="form.final" label="默认出站" hint="分流规则未命中时使用的出站" :options="finalOptions" />
+          <Select v-model="form.private_action" label="私网地址处理" hint="命中私网地址的目标如何处理" :options="[
             { label: 'reject 拒绝', value: 'reject' },
             { label: 'direct 直连', value: 'direct' },
             { label: 'off 不处理', value: 'off' },
@@ -31,23 +30,9 @@
       </div>
 
       <div class="card">
-        <h3 class="card-title">节点下发</h3>
-        <p class="muted" style="margin: -4px 0 14px; font-size: 12.5px">
-          服务器节点 agent 接入参数，修改后需重启面板进程生效。
-        </p>
-        <div class="form-grid">
-          <Input v-model.number="form.agent_port" label="Agent 端口" hint="修改后需重启面板进程生效" type="number" />
-          <Input v-model="form.agent_listen" label="Agent 监听地址" hint="修改后需重启面板进程生效" placeholder=":: / 0.0.0.0" />
-        </div>
-        <div class="row" style="margin-top: 18px; justify-content: flex-end">
-          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
-        </div>
-      </div>
-
-      <div class="card">
         <h3 class="card-title">订阅发布</h3>
         <div class="form-grid">
-          <Input v-model="form.sub_host" label="订阅地址 host" hint="留空跟随访问地址" placeholder="sub.example.com 或 1.2.3.4:8080" />
+          <Input v-model="form.sub_host" label="订阅主机 (域名/IP)" hint="留空则跟随浏览器访问地址 (反代友好); 可带端口如 sub.example.com:8443" placeholder="sub.example.com:8443" />
           <Input v-model="form.sub_path" label="订阅路径" hint="默认 sub" placeholder="sub" />
           <Input v-model.number="form.sub_port" label="订阅端口" hint="0 = 跟随订阅地址或请求端口; 反代到 443 之类场景填 443" type="number" placeholder="0" />
         </div>
@@ -100,8 +85,6 @@ const form = reactive({
   log_level: 'info',
   panel_listen: '',
   panel_port: 8080,
-  agent_listen: '',
-  agent_port: 9443,
   sub_host: '',
   sub_path: 'sub',
   sub_port: 0,
@@ -135,9 +118,7 @@ async function load() {
       log_level: s.log_level || 'info',
       panel_listen: s.panel_listen ?? '',
       panel_port: s.panel_port,
-      agent_listen: s.agent_listen ?? '',
-      agent_port: s.agent_port ?? 9443,
-      sub_host: s.sub_host ?? '',
+      sub_host: s.sub_host || s.host || '',
       sub_path: s.sub_path || 'sub',
       sub_port: s.sub_port ?? 0,
     })
@@ -153,10 +134,12 @@ async function load() {
 async function save() {
   saving.value = true
   try {
+    const subHost = form.sub_host.trim()
     await put('/api/settings', {
       ...form,
+      host: subHost,
+      sub_host: subHost,
       panel_port: Number(form.panel_port),
-      agent_port: Number(form.agent_port),
       sub_port: Number(form.sub_port) || 0,
     })
     toast('设置已保存，已自动下发到相关节点', 'success')

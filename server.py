@@ -178,6 +178,7 @@ def agent_cert_pem():
 
 
 def agent_cert_fingerprint():
+    ensure_agent_cert()
     _, cert, _ = agent_cert_paths()
     r = subprocess.run(["openssl", "x509", "-in", cert, "-outform", "DER"],
                        capture_output=True)
@@ -221,11 +222,10 @@ def install_script_hash():
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def install_command(sid, token, host):
-    """一键部署命令: 脚本哈希 + CA 指纹双校验, 闭合 TOFU 引导链"""
-    s = sbtool.get_settings(BASE)
-    port = int(s.get("agent_port") or 9443)
-    url = "https://%s:%d" % (host, port)
+def install_command(sid, token, hostport, scheme="http"):
+    """一键部署命令: 脚本哈希 + CA 指纹双校验, 闭合 TOFU 引导链。
+    面板与 agent 同端口; hostport 含对外端口 (反代友好)。"""
+    url = "%s://%s" % (scheme, hostport)
     return ("curl -fsSLk '%s/agent/install.sh' -o /tmp/ks-install.sh"
             " && echo '%s  /tmp/ks-install.sh' | sha256sum -c"
             " && bash /tmp/ks-install.sh '%s' '%s' '%s' '%s'"
@@ -511,8 +511,7 @@ def h_status(ctx):
                    "servers": len(servers), "servers_online": online,
                    "rules": len(rc.get("rules", [])), "rulesets": len(cat)},
         "server": {"host": s.get("host") or "", "sni": s.get("sni") or "",
-                   "panel_port": s.get("panel_port", 8080),
-                   "agent_port": s.get("agent_port", 9443)},
+                   "panel_port": s.get("panel_port", 8080)},
     }
 
 
@@ -657,33 +656,46 @@ def h_users_add(ctx):
     name = (b.get("name") or "").strip()
     if not name or not re.fullmatch(r"[A-Za-z0-9_\-]{1,32}", name):
         raise ApiError("用户名仅限字母/数字/_/-, 1-32 位")
-    users = sbtool.load_users(BASE)
-    if name in users:
-        raise ApiError("用户已存在")
     if name == sbtool.get_settings(BASE).get("admin_user", "admin"):
         raise ApiError("用户名与管理员冲突")
-    users[name] = {
-        "password": b.get("password") or sbtool.gen_password(),
-        "enable": True,
-        "token": sbtool.gen_token(),
-        "panel_password_hash": sbtool.hash_password(b["panel_password"]) if b.get("panel_password") else "",
-        "note": b.get("note") or "",
-        "traffic_limit": max(0, int(b.get("traffic_limit") or 0)),
-        "expire_at": max(0, int(b.get("expire_at") or 0)),
-        "reset_day": min(31, max(0, int(b.get("reset_day") or 0))),
-        "created_at": int(time.time()),
-    }
-    sbtool.save_users(BASE, users)
-    return 200, {"ok": True, "password": users[name]["password"]}
+    try:
+        traffic_limit = max(0, int(b.get("traffic_limit") or 0))
+        expire_at = max(0, int(b.get("expire_at") or 0))
+        reset_day = min(31, max(0, int(b.get("reset_day") or 0)))
+    except (TypeError, ValueError):
+        raise ApiError("流量限制/到期时间/重置日 必须是数字")
+    pw = b.get("password") or sbtool.gen_password()
+    with PROC_LOCK:
+        users = sbtool.load_users(BASE)
+        if name in users:
+            raise ApiError("用户已存在")
+        users[name] = {
+            "password": pw,
+            "enable": True,
+            "token": sbtool.gen_token(),
+            "panel_password_hash": sbtool.hash_password(b["panel_password"]) if b.get("panel_password") else "",
+            "note": b.get("note") or "",
+            "traffic_limit": traffic_limit,
+            "expire_at": expire_at,
+            "reset_day": reset_day,
+            "created_at": int(time.time()),
+        }
+        sbtool.save_users(BASE, users)
+    return 200, {"ok": True, "password": pw}
 
 
 def h_users_update(ctx):
     name = ctx.match.group(1)
+    b = ctx.body
+    with PROC_LOCK:
+        return _users_update_locked(name, b)
+
+
+def _users_update_locked(name, b):
     users = sbtool.load_users(BASE)
     if name not in users:
         raise ApiError("用户不存在", 404)
     u = users[name]
-    b = ctx.body
     if "enable" in b:
         new_enable = bool(b["enable"])
         if new_enable != u.get("enable", True):
@@ -696,24 +708,27 @@ def h_users_update(ctx):
         u["sv"] = u.get("sv", 0) + 1  # 面板密码变更后旧会话失效
     if "note" in b:
         u["note"] = b["note"]
-    if "traffic_limit" in b:
-        u["traffic_limit"] = max(0, int(b["traffic_limit"] or 0))
-    if "expire_at" in b:
-        u["expire_at"] = max(0, int(b["expire_at"] or 0))
-    if "reset_day" in b:
-        rd = int(b["reset_day"] or 0)
-        if not (0 <= rd <= 31):
-            raise ApiError("每月重置日需在 0-31 (0=不重置)")
-        u["reset_day"] = rd
-    if "renew_days" in b:  # 一键续期: 从 max(现在, 当前到期) 顺延 N 天
-        days = int(b["renew_days"] or 0)
-        if days <= 0 or days > 3650:
-            raise ApiError("续期天数非法")
-        u["expire_at"] = int(max(time.time(), u.get("expire_at") or 0)) + days * 86400
+    try:
+        if "traffic_limit" in b:
+            u["traffic_limit"] = max(0, int(b["traffic_limit"] or 0))
+        if "expire_at" in b:
+            u["expire_at"] = max(0, int(b["expire_at"] or 0))
+        if "reset_day" in b:
+            rd = int(b["reset_day"] or 0)
+            if not (0 <= rd <= 31):
+                raise ApiError("每月重置日需在 0-31 (0=不重置)")
+            u["reset_day"] = rd
+        if "renew_days" in b:  # 一键续期: 从 max(现在, 当前到期) 顺延 N 天
+            days = int(b["renew_days"] or 0)
+            if days <= 0 or days > 3650:
+                raise ApiError("续期天数非法")
+            u["expire_at"] = int(max(time.time(), u.get("expire_at") or 0)) + days * 86400
+    except (TypeError, ValueError):
+        raise ApiError("流量限制/到期时间/重置日 必须是数字")
     if b.get("refresh_token"):
         u["token"] = sbtool.gen_token()
     sbtool.save_users(BASE, users)
-    sbtool.sync_user_states(BASE)  # 立即重算超额/到期标志
+    sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)  # 立即重算超额/到期标志
     return 200, {"ok": True, "token": u["token"], "password": u["password"],
                  "expire_at": u.get("expire_at", 0), "traffic_limit": u.get("traffic_limit", 0)}
 
@@ -752,20 +767,18 @@ def h_users_reset_usage(ctx):
     users = sbtool.load_users(BASE)
     if name not in users:
         raise ApiError("用户不存在", 404)
-    P = sbtool.paths(BASE)
-    with PROC_LOCK:
-        t = sbtool.load_traffic(BASE)
-        tot = t["users"].get(name, {})
-        t.setdefault("offsets", {})[name] = {"up": tot.get("up", 0),
-                                             "down": tot.get("down", 0),
-                                             "since": int(time.time())}
-        sbtool.save_json(P["traffic"], t)
-    sbtool.sync_user_states(BASE)
+    sbtool.reset_user_usage(BASE, name)
+    sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)
     return 200, {"ok": True}
 
 
 def h_users_del(ctx):
     name = ctx.match.group(1)
+    with PROC_LOCK:
+        return _users_del_locked(name)
+
+
+def _users_del_locked(name):
     users = sbtool.load_users(BASE)
     if name not in users:
         raise ApiError("用户不存在", 404)
@@ -939,7 +952,7 @@ def h_ruleset_sources(ctx):
 
 SETTINGS_EDITABLE = ("final", "host", "sni",
                      "private_action", "auto_detect_interface", "log_level",
-                     "panel_listen", "panel_port", "agent_listen", "agent_port",
+                     "panel_listen", "panel_port",
                      "sub_host", "sub_port", "sub_path")
 
 def h_settings_get(ctx):
@@ -956,7 +969,7 @@ def h_settings_put(ctx):
     for k in SETTINGS_EDITABLE:
         if k in b:
             v = b[k]
-            if k in ("panel_port", "agent_port"):
+            if k == "panel_port":
                 v = int(v)
                 if not (1 <= v <= 65535):
                     raise ApiError("端口非法")
@@ -1086,7 +1099,8 @@ def h_servers_add(ctx):
         servers[sid] = srv
         sbtool.save_servers(BASE, servers)
     return 200, {"sid": sid, "token": token,
-                 "install_command": install_command(sid, token, request_host(ctx.headers))}
+                 "install_command": install_command(sid, token, request_host_port(ctx.headers),
+                                                  "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http")}
 
 
 def h_servers_update(ctx):
@@ -1138,7 +1152,8 @@ def h_servers_token(ctx):
         servers[sid]["token_hash"] = sbtool.hash_server_token(token)
         sbtool.save_servers(BASE, servers)
     return 200, {"ok": True, "token": token,
-                 "install_command": install_command(sid, token, request_host(ctx.headers))}
+                 "install_command": install_command(sid, token, request_host_port(ctx.headers),
+                                                  "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http")}
 
 
 def h_servers_config(ctx):
@@ -1245,9 +1260,7 @@ def h_system(ctx):
 
 def h_agent_info(ctx):
     """agent 通道信息: CA 指纹(供操作员在节点侧人工比对)与端口"""
-    s = sbtool.get_settings(BASE)
-    return 200, {"agent_port": int(s.get("agent_port") or 9443),
-                 "ca_fingerprint": agent_cert_fingerprint()}
+    return 200, {"ca_fingerprint": agent_cert_fingerprint()}
 
 
 def h_certs(ctx):
@@ -1373,6 +1386,7 @@ def h_agent_install(ctx):
 
 
 def h_agent_ca(ctx):
+    ensure_agent_cert()
     _, cert, _ = agent_cert_paths()
     with open(cert, "rb") as f:
         return 200, Raw(f.read(), "application/x-pem-file")
@@ -1393,7 +1407,10 @@ def h_agent_report(ctx):
             clean[name] = pair
     sbtool.add_traffic(BASE, ctx.sid, clean)
     note_report_rates(ctx.sid, clean)
-    sbtool.sync_user_states(BASE)  # 流量变化后即时维护 超额/到期/月重置 状态
+    try:
+        sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)  # 维护 超额/到期/月重置
+    except Exception:
+        pass  # 状态维护失败不影响上报主流程
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
@@ -1444,11 +1461,15 @@ def h_me(ctx):
 
 def h_me_password(ctx):
     name = ctx.user["name"]
+    with PROC_LOCK:
+        return _me_password_locked(name, ctx.body)
+
+
+def _me_password_locked(name, b):
     users = sbtool.load_users(BASE)
     u = users.get(name)
     if not u:
         raise ApiError("用户不存在", 404)
-    b = ctx.body
     if u.get("panel_password_hash"):
         if not sbtool.verify_password(b.get("old") or "", u["panel_password_hash"]):
             raise ApiError("原密码错误", 403)
@@ -1901,6 +1922,35 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             raise ApiError("请求体必须是 JSON")
 
+    def handle_agent(self, path, query):
+        """agent 通道: /agent/* 接口, 节点 token 认证。返回 True 表示已处理。"""
+        for method, pattern, fn in AGENT_ROUTES_PUBLIC:
+            if method == self.command and re.fullmatch(pattern, path):
+                code, obj = fn(Ctx(self, {}, query, None, None))
+                self._send(code, obj.data, obj.ctype)
+                return True
+        for method, pattern, fn in AGENT_ROUTES:
+            if method != self.command:
+                continue
+            m = re.fullmatch(pattern, path)
+            if not m:
+                continue
+            sid, srv, token = auth_agent(self.headers)  # 先认证再读 body, 防未认证资源消耗
+            body = {}
+            if self.command in ("POST", "PUT", "DELETE"):
+                body = self.read_body()
+            ctx = Ctx(self, body, query, None, m)
+            ctx.sid = sid
+            ctx.srv = srv
+            ctx.token = token
+            code, obj = fn(ctx)
+            if isinstance(obj, Raw):
+                self._send(code, obj.data, obj.ctype)
+            else:
+                self.send_json(code, obj)
+            return True
+        return False
+
     def auth_user(self):
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
@@ -1912,6 +1962,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
         query = {k: v[0] for k, v in query.items()}
+
+        # agent 通道 (与面板同端口): /agent/*
+        if path.startswith("/agent/") and self.handle_agent(path, query):
+            return
 
         # 订阅 (路径可通过设置 sub_path 自定义)
         sub_path = re.escape(sbtool.get_settings(BASE).get("sub_path") or "sub")
@@ -2024,77 +2078,12 @@ AGENT_ROUTES = [  # Bearer 节点 token 认证
 ]
 
 
-class AgentHandler(Handler):
-    """agent 专用通道: 仅 /agent/* 接口, 节点 token 认证, 与面板 API 完全隔离"""
-
-    def dispatch(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
-        for method, pattern, fn in AGENT_ROUTES_PUBLIC:
-            if method == self.command and re.fullmatch(pattern, path):
-                code, obj = fn(Ctx(self, {}, query, None, None))
-                self._send(code, obj.data, obj.ctype)
-                return
-        for method, pattern, fn in AGENT_ROUTES:
-            if method != self.command:
-                continue
-            m = re.fullmatch(pattern, path)
-            if not m:
-                continue
-            sid, srv, token = auth_agent(self.headers)  # 先认证再读 body, 防未认证资源消耗
-            body = {}
-            if self.command in ("POST", "PUT", "DELETE"):
-                body = self.read_body()
-            ctx = Ctx(self, body, query, None, m)
-            ctx.sid = sid
-            ctx.srv = srv
-            ctx.token = token
-            code, obj = fn(ctx)
-            if isinstance(obj, Raw):
-                self._send(code, obj.data, obj.ctype)
-            else:
-                self.send_json(code, obj)
-            return
-        raise ApiError("接口不存在", 404)
-
-
-def start_agent_server(s):
-    """启动 agent 专用 HTTPS 监听 (自签证书, agent 端 CA 固定); 失败仅告警不影响面板"""
-    port = int(s.get("agent_port") or 0)
-    if not port:
-        return None
-    if port == int(s.get("panel_port") or 8080):
-        print("警告: agent_port 与面板端口相同, 跳过 agent 监听")
-        return None
-    try:
-        cert, key = ensure_agent_cert()
-    except ApiError as e:
-        print("警告: %s, agent 通道未启动" % e)
-        return None
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(cert, key)
-    listen = s.get("agent_listen") or "::"
-    if ":" in listen:
-        srv = V6Server((listen, port), AgentHandler)
-    else:
-        srv = ThreadingHTTPServer((listen, port), AgentHandler)
-        srv.daemon_threads = True
-    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    print("agent 下发通道已启动: https://[%s]:%d (证书指纹 sha256:%s)"
-          % (listen, port, agent_cert_fingerprint()))
-    return srv
-
-
 def _janitor():
     """每分钟维护用户状态 (到期/超额/按月重置), 触发节点配置更新"""
     while True:
         time.sleep(60)
         try:
-            sbtool.sync_user_states(BASE)
+            sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)
         except Exception:
             pass
 
@@ -2114,7 +2103,6 @@ def main():
     listen = args.listen or s.get("panel_listen") or "::"
     port = args.port or int(s.get("panel_port") or 8080)
     get_secret()
-    start_agent_server(s)
     threading.Thread(target=_janitor, daemon=True).start()
     if ":" in listen:
         srv = V6Server((listen, port), Handler)

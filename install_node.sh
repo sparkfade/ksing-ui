@@ -11,7 +11,7 @@ SID="${2:?缺少 sid}"
 TOKEN="${3:?缺少 token}"
 CA_FP="${4:?缺少 CA 指纹}"
 DIR=/etc/ksing
-BIN=/usr/local/bin/sing-box
+BIN=/usr/local/bin/k-sing
 PYBIN="$(command -v python3 || true)"
 
 [ "$(id -u)" = "0" ] || { echo "需要 root 运行"; exit 1; }
@@ -24,7 +24,8 @@ case "$(uname -m)" in
   aarch64|arm64) ARCH=arm64 ;;
   *) echo "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
-[[ "$PANEL_URL" =~ ^https://[A-Za-z0-9.:-]+$ ]] || { echo "面板地址非法"; exit 1; }
+[[ "$PANEL_URL" =~ ^https?://[A-Za-z0-9.:-]+$ ]] || { echo "面板地址非法"; exit 1; }
+[[ "$PANEL_URL" =~ ^http:// ]] && echo "!! 警告: 面板为明文 HTTP, 节点与面板间通信(含节点 token)不加密, 生产环境请用 nginx 反代加 TLS"
 [[ "$SID" =~ ^[0-9a-f]{8}$ ]] || { echo "sid 非法"; exit 1; }
 [[ "$TOKEN" =~ ^[0-9a-f]{64}$ ]] || { echo "token 非法"; exit 1; }
 [[ "$CA_FP" =~ ^[0-9a-f]{64}$ ]] || { echo "CA 指纹非法"; exit 1; }
@@ -32,15 +33,32 @@ esac
 mkdir -p "$DIR/rulesets"
 chmod 700 "$DIR"
 
-# 下载面板 CA 并校验指纹 (TOFU 通道上防 MITM 换证书)
-curl -fsSLk "$PANEL_URL/agent/ca.pem" -o "$DIR/panel-ca.pem"
-GOT_FP="$(openssl x509 -in "$DIR/panel-ca.pem" -outform DER | sha256sum | cut -d' ' -f1)"
-[ "$GOT_FP" = "$CA_FP" ] || { echo "面板 CA 指纹不匹配! 期望 $CA_FP 实际 $GOT_FP , 可能遭遇中间人攻击, 终止。"; rm -f "$DIR/panel-ca.pem"; exit 1; }
-chmod 644 "$DIR/panel-ca.pem"
+USE_PANEL_CA=0
+if [[ "$PANEL_URL" =~ ^https:// ]]; then
+  if curl -fsSL --max-time 15 "$PANEL_URL/agent/ca.pem" -o /dev/null 2>/dev/null; then
+    echo "面板使用公开受信证书 (如 nginx 反代), 走系统 CA 校验"
+    rm -f "$DIR/panel-ca.pem"
+  else
+    # 面板自签证书: 下载 CA 并校验指纹 (TOFU 通道上防 MITM 换证书)
+    curl -fsSLk "$PANEL_URL/agent/ca.pem" -o "$DIR/panel-ca.pem"
+    GOT_FP="$(openssl x509 -in "$DIR/panel-ca.pem" -outform DER | sha256sum | cut -d' ' -f1)"
+    [ "$GOT_FP" = "$CA_FP" ] || { echo "面板 CA 指纹不匹配! 期望 $CA_FP 实际 $GOT_FP , 可能遭遇中间人攻击, 终止。"; rm -f "$DIR/panel-ca.pem"; exit 1; }
+    chmod 644 "$DIR/panel-ca.pem"
+    USE_PANEL_CA=1
+  fi
+else
+  echo "!! 面板为明文 HTTP, agent 通信不加密, 强烈建议用 nginx 反代加 TLS"
+  rm -f "$DIR/panel-ca.pem"
+fi
 # 面板证书 CN=ksing-panel-agent 为固定信任锚; 用 --resolve 把该名字指到面板地址,
 # 使 TLS 主机名校验对任意面板 IP/域名都能通过 (等效证书钉扎)
-PHOST="$(echo "$PANEL_URL" | sed 's|https://||; s|:[0-9]*$||; s|^\[||; s|\]$||')"
-PPORT="$(echo "$PANEL_URL" | grep -oE '[0-9]+$' || true)"
+URLHOSTPORT="${PANEL_URL#*://}"          # 去 scheme
+case "$URLHOSTPORT" in
+  \[*\]:*) PHOST="${URLHOSTPORT%%\]*}"; PHOST="${PHOST#\[}"; PPORT="${URLHOSTPORT##*:}" ;;
+  \[*\])   PHOST="${URLHOSTPORT#\[}"; PHOST="${PHOST%\]}"; PPORT="" ;;
+  *:*)       PHOST="${URLHOSTPORT%%:*}"; PPORT="${URLHOSTPORT##*:}" ;;
+  *)         PHOST="$URLHOSTPORT"; PPORT="" ;;
+esac
 PPORT="${PPORT:-443}"
 [[ "$PHOST" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$PHOST" =~ ^[0-9a-fA-F:]+$ ]] || { echo "面板主机非法: $PHOST"; exit 1; }
 # curl --resolve 只接受 IP: 域名先解析 (优先 IPv4, 兜底 IPv6)
@@ -51,17 +69,22 @@ if ! [[ "$PHOST" =~ ^[0-9.]+$ ]] && ! [[ "$PHOST" =~ ^[0-9a-fA-F:]+$ ]]; then
   PHOST="$RIP"
 fi
 case "$PHOST" in *:*) RHOST="[$PHOST]" ;; *) RHOST="$PHOST" ;; esac  # IPv6 需方括号
-CURL="curl -fsSL --cacert $DIR/panel-ca.pem --resolve ksing-panel-agent:$PPORT:$RHOST"
+if [ "$USE_PANEL_CA" = "1" ]; then
+  CURL="curl -fsSL --cacert $DIR/panel-ca.pem --resolve ksing-panel-agent:$PPORT:$RHOST"
+else
+  CURL="curl -fsSL"   # 系统 CA (https) 或明文 (http)
+fi
 PINNED_URL="https://ksing-panel-agent:$PPORT"
 
 echo "[1/5] 下载 sing-box ($ARCH) ..."
-$CURL -H "Authorization: Bearer $TOKEN" "$PINNED_URL/agent/binary/$ARCH" -o "$BIN.new"
+if [ "$USE_PANEL_CA" = "1" ]; then API_URL="$PINNED_URL"; else API_URL="$PANEL_URL"; fi
+$CURL -H "Authorization: Bearer $TOKEN" "$API_URL/agent/binary/$ARCH" -o "$BIN.new"
 chmod 755 "$BIN.new"
 mv "$BIN.new" "$BIN"
 "$BIN" version
 
 # 节点元信息: 证书模式/域名/端口等 (面板统一管理)
-META="$($CURL -H "Authorization: Bearer $TOKEN" "$PINNED_URL/agent/node-meta")"
+META="$($CURL -H "Authorization: Bearer $TOKEN" "$API_URL/agent/node-meta")"
 CERT_MODE="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("cert_mode",""))' <<<"$META")"
 SNI="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("sni",""))' <<<"$META")"
 DOMAIN="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("domain",""))' <<<"$META")"
@@ -101,26 +124,33 @@ esac
 echo "[3/5] 写入 agent 配置 ..."
 cat > "$DIR/agent.json" <<EOF
 {"panel": "$PANEL_URL", "sid": "$SID", "token": "$TOKEN",
- "ca": "$DIR/panel-ca.pem", "dir": "$DIR", "bin": "$BIN",
+ "ca": "$([ "$USE_PANEL_CA" = "1" ] && echo "$DIR/panel-ca.pem")", "dir": "$DIR", "bin": "$BIN",
  "pull_interval": 30, "push_interval": 10}
 EOF
 chmod 600 "$DIR/agent.json"
 
 echo "[4/5] 安装 agent ..."
-$CURL -H "Authorization: Bearer $TOKEN" "$PINNED_URL/agent/agent.py" -o "$DIR/agent.py"
+$CURL -H "Authorization: Bearer $TOKEN" "$API_URL/agent/agent.py" -o "$DIR/agent.py"
 chmod 700 "$DIR/agent.py"
 
 echo "[5/5] 注册并启动 systemd 服务 ..."
-cat > /etc/systemd/system/sing-box.service <<EOF
+# 迁移旧版 unit: 我们以前装的 sing-box.service (含 ksing 标记) 停掉删除, 与官版 sing-box 并存不冲突
+if [ -f /etc/systemd/system/sing-box.service ] && grep -q "ksing node" /etc/systemd/system/sing-box.service; then
+  echo "  迁移旧版 sing-box.service → k-sing.service"
+  systemctl disable --now sing-box 2>/dev/null || true
+  rm -f /etc/systemd/system/sing-box.service
+fi
+cat > /etc/systemd/system/k-sing.service <<EOF
 [Unit]
-Description=sing-box (ksing node)
+Description=k-sing (ksing node)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 ExecStart=$BIN run -c $DIR/config.json
-Restart=on-failure
+Restart=always
 RestartSec=3
+StartLimitIntervalSec=0
 LimitNOFILE=1048576
 
 [Install]
@@ -136,6 +166,7 @@ Wants=network-online.target
 ExecStart=$PYBIN $DIR/agent.py
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -144,7 +175,7 @@ systemctl daemon-reload
 
 # 首次拉取配置 (生成 $DIR/config.json) 后启动
 if $PYBIN "$DIR/agent.py" --once; then
-  systemctl enable --now sing-box ksing-agent
+  systemctl enable --now k-sing ksing-agent
   echo "完成: 节点已接入面板并在线。"
 else
   echo "首次配置拉取失败, 请检查面板连通性后重试: $PYBIN $DIR/agent.py --once"

@@ -34,7 +34,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -44,8 +44,9 @@ with open(CFG_PATH, "r", encoding="utf-8") as _f:
     _C = json.load(_f)
 
 PANEL = _C["panel"].rstrip("/")
-if not PANEL.lower().startswith("https://"):
-    sys.exit("agent.json 的 panel 必须是 https:// 地址 (明文通道会泄露节点 token)")
+IS_HTTPS = PANEL.lower().startswith("https://")
+if not IS_HTTPS:
+    print("警告: 面板地址为明文 HTTP, agent 通信(含节点 token)不加密, 建议用 nginx 反代加 TLS", flush=True)
 TOKEN = _C["token"]
 DIR = _C.get("dir", "/etc/ksing")
 BIN = _C.get("bin", "/usr/local/bin/sing-box")
@@ -55,6 +56,7 @@ PULL_INTERVAL = int(_C.get("pull_interval", 30))
 PUSH_INTERVAL = int(_C.get("push_interval", 10))
 STATE_PATH = os.path.join(DIR, "agent-state.json")
 RULESET_DIR = os.path.join(DIR, "rulesets")
+HEALTH = {"ok_at": time.time()}  # 看门狗: 面板通信连续失败则退出让 systemd 重启
 
 
 def log(msg):
@@ -64,10 +66,13 @@ def log(msg):
 # ------------------------------------------------------------------ 面板 HTTPS (CA 固定)
 
 def make_ssl_ctx():
-    # 只信任面板这张自签证书, 等效于证书指纹锁定; 故不再校验主机名
-    ctx = ssl.create_default_context(cafile=CA)
-    ctx.check_hostname = False
-    return ctx
+    if CA and os.path.exists(CA):
+        # 只信任面板这张自签证书, 等效于证书指纹锁定; 故不再校验主机名
+        ctx = ssl.create_default_context(cafile=CA)
+        ctx.check_hostname = False
+        return ctx
+    # 无面板 CA: 系统 CA + 主机名校验 (面板用正式证书, 如 nginx 反代)
+    return ssl.create_default_context()
 
 
 SSL_CTX = make_ssl_ctx()
@@ -91,7 +96,9 @@ def api(method, path, body=None, timeout=30):
         "Content-Type": "application/json",
     })
     with _OPENER.open(req, timeout=timeout) as r:
-        return r.read()
+        out = r.read()
+    HEALTH["ok_at"] = time.time()  # 面板通信成功, 喂看门狗
+    return out
 
 
 def api_json(method, path, body=None, timeout=30):
@@ -314,20 +321,34 @@ def sync_rulesets(metas):
         log("规则集已同步: %s (%d 字节)" % (m["tag"], len(data)))
 
 
+def svc_name():
+    """我们的 systemd 服务名: 新版 k-sing; 兼容旧部署(我们装的 sing-box.service, 含 ksing 标记)"""
+    for base in ("/etc/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"):
+        if os.path.exists(os.path.join(base, "k-sing.service")):
+            return "k-sing"
+    p = "/etc/systemd/system/sing-box.service"
+    if os.path.exists(p):
+        try:
+            if "ksing" in open(p, encoding="utf-8", errors="ignore").read():
+                return "sing-box"
+        except OSError:
+            pass
+    return ""
+
+
 def have_systemd_unit():
     return (os.path.isdir("/run/systemd/system") and shutil.which("systemctl")
-            and (os.path.exists("/etc/systemd/system/sing-box.service")
-                 or os.path.exists("/usr/lib/systemd/system/sing-box.service")
-                 or os.path.exists("/lib/systemd/system/sing-box.service")))
+            and bool(svc_name()))
 
 
 def restart_singbox():
+    svc = svc_name()
     if have_systemd_unit():
-        r = subprocess.run(["systemctl", "restart", "sing-box"], capture_output=True, text=True,
+        r = subprocess.run(["systemctl", "restart", svc], capture_output=True, text=True,
                            timeout=30)
         if r.returncode == 0:
             return
-        log("systemctl restart sing-box 失败(%s), 改用直接进程管理" % (r.stderr or r.stdout).strip()[:200])
+        log("systemctl restart %s 失败(%s), 改用直接进程管理" % (svc, (r.stderr or r.stdout).strip()[:200]))
     # 无 systemd 单元 (容器/调试): 直接管理进程
     pidfile = os.path.join(DIR, "sing-box.pid")
     try:
@@ -384,7 +405,10 @@ def query_public_ip():
 
 
 def self_update(resp):
-    """面板下发的 agent_sha256 与自身不一致时, 从面板拉新版本并原地重启 (TLS 钉扎通道)"""
+    """面板下发的 agent_sha256 与自身不一致时, 从面板拉新版本并原地重启。
+    仅 HTTPS 通道启用 (明文 HTTP 下 hash 与代码可被同时伪造, 禁用以防 RCE)。"""
+    if not IS_HTTPS:
+        return
     want = resp.get("agent_sha256")
     if not want:
         return
@@ -442,8 +466,9 @@ def singbox_running():
         return True
     except (OSError, ValueError):
         pass
-    if have_systemd_unit():
-        r = subprocess.run(["systemctl", "is-active", "sing-box"], capture_output=True, text=True,
+    svc = svc_name()
+    if svc:
+        r = subprocess.run(["systemctl", "is-active", svc], capture_output=True, text=True,
                            timeout=15)
         return r.stdout.strip() == "active"
     return False
@@ -528,6 +553,10 @@ def main():
     next_check = 0.0
     while True:
         now = time.time()
+        if now - HEALTH["ok_at"] > 300:
+            # 5 分钟无法与面板通信 (卡死/网络分区), 退出由 systemd 重启自愈
+            log("与面板通信中断超过 5 分钟, 重启 agent 自愈")
+            os._exit(1)
         try:
             if now >= next_check:
                 if not singbox_running():

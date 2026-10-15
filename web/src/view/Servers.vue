@@ -63,7 +63,7 @@
                 <div class="row" style="gap: 6px">
                   <Button small @click="openEdit(s)">编辑</Button>
                   <Button small @click="openRoute(s)">分流</Button>
-                  <Button small title="重置部署命令，旧 token 立即失效" @click="resetToken(s)">部署</Button>
+                  <Button small title="重置部署命令，旧 token 立即失效" @click="resetToken(s)">重新部署</Button>
                   <Button small @click="preview(s)">配置</Button>
                   <Button small variant="danger" @click="del(s)">删除</Button>
                 </div>
@@ -106,7 +106,7 @@
     </Modal>
 
     <!-- 安装命令（token 仅显示一次） -->
-    <Modal v-model:visible="installVisible" title="节点部署命令">
+    <Modal v-model:visible="installVisible" title="重新部署节点">
       <p class="warn-big">请立即复制部署命令，token 仅显示这一次。</p>
       <CodeBox :text="installCmd" multiline />
       <p v-if="caFingerprint" class="muted ca-fp" :title="`完整指纹: ${caFingerprint}`">
@@ -116,7 +116,7 @@
         <CopyButton :text="installCmd" label="复制部署命令" />
       </div>
       <p class="muted" style="margin: 12px 0 0; font-size: 12.5px">
-        在目标 VPS 上以 root 执行该命令即可完成接入，之后可在本页查看在线状态。
+        在节点上重新执行以下命令即可刷新部署；token 每次重新生成，旧 token 立即失效。
       </p>
       <template #footer>
         <Button variant="primary" @click="installVisible = false">我已保存</Button>

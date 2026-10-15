@@ -132,7 +132,7 @@ export interface RoutesData {
 
 export interface StatusData {
   counts: { users: number; nodes: number; servers: number; servers_online: number; rules: number; rulesets: number }
-  server: { host: string; sni: string; panel_port: number; agent_port: number }
+  server: { host: string; sni: string; panel_port: number }
 }
 
 export interface RulesetItem {
@@ -157,8 +157,6 @@ export interface Settings {
   log_level: string
   panel_listen: string
   panel_port: number
-  agent_listen: string
-  agent_port: number
   sub_host: string
   sub_path: string
   sub_port?: number

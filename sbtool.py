@@ -801,7 +801,8 @@ def server_insecure(srv):
 
 def server_users(base, srv):
     """该节点实际下发的用户 {name: user} (交集: 可用用户 ∩ 节点分配用户; 空列表=全部)"""
-    users = {k: u for k, u in load_users(base).items() if user_active(base, k, u)}
+    t = load_traffic(base)  # 读一次, 避免每用户重复 IO
+    users = {k: u for k, u in load_users(base).items() if user_active(base, k, u, t)}
     want = [u for u in srv.get("users", []) if u]
     if not want:
         return users
@@ -1068,15 +1069,18 @@ def load_traffic(base):
 
 
 def period_start(reset_day, now=None):
-    """最近一个"每月 reset_day 日"的起点时间戳"""
+    """最近一个"每月 reset_day 日"的起点时间戳 (短月自动取当月最后一天)"""
+    import calendar
     import datetime
     n = datetime.datetime.fromtimestamp(now or time.time())
-    if n.day >= reset_day:
-        p = n.replace(day=reset_day, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        p = (n.replace(day=1) - datetime.timedelta(days=1)).replace(
-            day=reset_day, hour=0, minute=0, second=0, microsecond=0)
-    return p.timestamp()
+    y, m = n.year, n.month
+    if n.day < reset_day:
+        # 回退到上个月
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    day = min(reset_day, calendar.monthrange(y, m)[1])
+    return datetime.datetime(y, m, day).timestamp()
 
 
 def effective_usage(base, name, t=None):
@@ -1105,8 +1109,9 @@ def user_active(base, name, u, t=None):
     return True
 
 
-def sync_user_states(base):
-    """按月重置流量 + 到期/超额自动踢出与恢复 (users.json 变化会触发节点重新拉配置)"""
+def sync_user_states(base, users_lock=None):
+    """按月重置流量 + 到期/超额自动踢出与恢复 (users.json 变化会触发节点重新拉配置)。
+    users_lock: 多进程/多线程环境下 users.json 的写锁 (如面板的 PROC_LOCK)"""
     import fcntl
     P = paths(base)
     now = time.time()
@@ -1140,7 +1145,27 @@ def sync_user_states(base):
             if t_changed:
                 save_json(P["traffic"], t)
             if u_changed:
-                save_users(base, users)
+                if users_lock:
+                    with users_lock:
+                        save_users(base, users)
+                else:
+                    save_users(base, users)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def reset_user_usage(base, name):
+    """一键重置用户当前周期流量 (带文件锁)"""
+    import fcntl
+    P = paths(base)
+    with open(P["traffic"] + ".lock", "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            t = load_traffic(base)
+            tot = t["users"].get(name, {})
+            t["offsets"][name] = {"up": tot.get("up", 0), "down": tot.get("down", 0),
+                                  "since": int(time.time())}
+            save_json(P["traffic"], t)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
