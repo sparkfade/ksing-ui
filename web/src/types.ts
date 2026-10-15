@@ -33,6 +33,10 @@ export interface UserInfo {
   sub_urls?: SubUrls
   traffic?: TrafficStat
   servers?: string[]
+  active?: boolean
+  traffic_limit?: number
+  expire_at?: number
+  reset_day?: number
 }
 
 export interface ServerItem {

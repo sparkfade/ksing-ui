@@ -311,6 +311,8 @@ def user_server_links(name, u):
 
 def user_nodes(name, u):
     """用户可见节点详情 [{name, server, port, password, sni, insecure}]"""
+    if not sbtool.user_active(BASE, name, u):
+        return []
     s = sbtool.get_settings(BASE)
     servers = sbtool.load_servers(BASE)
     out = []
@@ -409,13 +411,15 @@ def sub_url_for(s, token, req_host="", scheme="http"):
 def user_view(name, u, s, req_host="", scheme="http"):
     links = user_server_links(name, u) if u.get("enable") else []
     sub_url = sub_url_for(s, u["token"], req_host, scheme)
-    tr = sbtool.load_traffic(BASE)["users"].get(name, {})
+    tr = sbtool.effective_usage(BASE, name)
     servers = sbtool.load_servers(BASE)
     member = [sid for sid, srv in servers.items()
               if srv.get("enabled", True) and (not (srv.get("users") or []) or name in srv["users"])]
+    active = sbtool.user_active(BASE, name, u)
     return {
         "name": name,
         "enable": bool(u.get("enable", True)),
+        "active": active,
         "password": u["password"],
         "token": u["token"],
         "note": u.get("note", ""),
@@ -428,6 +432,9 @@ def user_view(name, u, s, req_host="", scheme="http"):
         "sub_urls": {"singbox": sub_url + "?type=singbox", "clash": sub_url + "?type=clash",
                      "v2ray": sub_url} if sub_url else {},
         "traffic": {"up": tr.get("up", 0), "down": tr.get("down", 0)},
+        "traffic_limit": int(u.get("traffic_limit") or 0),
+        "expire_at": int(u.get("expire_at") or 0),
+        "reset_day": int(u.get("reset_day") or 0),
     }
 
 
@@ -661,6 +668,9 @@ def h_users_add(ctx):
         "token": sbtool.gen_token(),
         "panel_password_hash": sbtool.hash_password(b["panel_password"]) if b.get("panel_password") else "",
         "note": b.get("note") or "",
+        "traffic_limit": max(0, int(b.get("traffic_limit") or 0)),
+        "expire_at": max(0, int(b.get("expire_at") or 0)),
+        "reset_day": min(31, max(0, int(b.get("reset_day") or 0))),
         "created_at": int(time.time()),
     }
     sbtool.save_users(BASE, users)
@@ -686,10 +696,26 @@ def h_users_update(ctx):
         u["sv"] = u.get("sv", 0) + 1  # 面板密码变更后旧会话失效
     if "note" in b:
         u["note"] = b["note"]
+    if "traffic_limit" in b:
+        u["traffic_limit"] = max(0, int(b["traffic_limit"] or 0))
+    if "expire_at" in b:
+        u["expire_at"] = max(0, int(b["expire_at"] or 0))
+    if "reset_day" in b:
+        rd = int(b["reset_day"] or 0)
+        if not (0 <= rd <= 31):
+            raise ApiError("每月重置日需在 0-31 (0=不重置)")
+        u["reset_day"] = rd
+    if "renew_days" in b:  # 一键续期: 从 max(现在, 当前到期) 顺延 N 天
+        days = int(b["renew_days"] or 0)
+        if days <= 0 or days > 3650:
+            raise ApiError("续期天数非法")
+        u["expire_at"] = int(max(time.time(), u.get("expire_at") or 0)) + days * 86400
     if b.get("refresh_token"):
         u["token"] = sbtool.gen_token()
     sbtool.save_users(BASE, users)
-    return 200, {"ok": True, "token": u["token"], "password": u["password"]}
+    sbtool.sync_user_states(BASE)  # 立即重算超额/到期标志
+    return 200, {"ok": True, "token": u["token"], "password": u["password"],
+                 "expire_at": u.get("expire_at", 0), "traffic_limit": u.get("traffic_limit", 0)}
 
 
 def h_users_servers(ctx):
@@ -717,6 +743,24 @@ def h_users_servers(ctx):
                 else:
                     srv["users"] = [u for u in cur if u != name]
         sbtool.save_servers(BASE, servers)
+    return 200, {"ok": True}
+
+
+def h_users_reset_usage(ctx):
+    """一键重置用户流量 (当前周期清零, 自动解除超额状态)"""
+    name = ctx.match.group(1)
+    users = sbtool.load_users(BASE)
+    if name not in users:
+        raise ApiError("用户不存在", 404)
+    P = sbtool.paths(BASE)
+    with PROC_LOCK:
+        t = sbtool.load_traffic(BASE)
+        tot = t["users"].get(name, {})
+        t.setdefault("offsets", {})[name] = {"up": tot.get("up", 0),
+                                             "down": tot.get("down", 0),
+                                             "since": int(time.time())}
+        sbtool.save_json(P["traffic"], t)
+    sbtool.sync_user_states(BASE)
     return 200, {"ok": True}
 
 
@@ -1349,6 +1393,7 @@ def h_agent_report(ctx):
             clean[name] = pair
     sbtool.add_traffic(BASE, ctx.sid, clean)
     note_report_rates(ctx.sid, clean)
+    sbtool.sync_user_states(BASE)  # 流量变化后即时维护 超额/到期/月重置 状态
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
@@ -1459,6 +1504,7 @@ ROUTES = [
     ("POST", r"/api/users", h_users_add, "admin"),
     ("PUT", r"/api/users/([^/]+)", h_users_update, "admin"),
     ("PUT", r"/api/users/([^/]+)/servers", h_users_servers, "admin"),
+    ("POST", r"/api/users/([^/]+)/reset_usage", h_users_reset_usage, "admin"),
     ("DELETE", r"/api/users/([^/]+)", h_users_del, "admin"),
     ("GET", r"/api/routes", h_routes_list, "admin"),
     ("POST", r"/api/routes", h_routes_add, "admin"),
@@ -1536,7 +1582,8 @@ def sub_page(name, links, sub_url):
 # ------------------------------------------------------------------ 订阅格式渲染
 
 def render_clash(nodes):
-    """mihomo/Clash 订阅: 完整配置, fakeip + DNS 防泄露 + 国内直连/国外代理 (与服务端分流互不干扰)"""
+    """mihomo/Clash 订阅: 完整配置, fakeip + DNS 防泄露 + 国内直连/国外代理 (与服务端分流互不干扰)。
+    规则集经代理下载 (proxy: 节点选择), 解决 GitHub 直连被墙导致规则下载失败、全部流量落 MATCH 的问题。"""
     lines = [
         "# ksing-ui 订阅 (mihomo)",
         "mixed-port: 7890",
@@ -1544,6 +1591,13 @@ def render_clash(nodes):
         "mode: rule",
         "log-level: warning",
         "external-controller: 127.0.0.1:9090",
+        "geodata-mode: true",          # geosite:cn 等需要 geosite.dat
+        "geo-auto-update: true",
+        "geo-update-interval: 24",
+        "geox-url:",
+        "  geosite: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+        "  geoip: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+        "  mmdb: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb",
         "tun:",
         "  enable: true",
         "  stack: mixed",
@@ -1572,12 +1626,10 @@ def render_clash(nodes):
         "    - https://223.6.6.6/dns-query",
         "  respect-rules: true",       # DNS 查询遵循路由规则 (#节点选择 后缀走代理)
         "  nameserver-policy:",
-        "    'geosite:cn':",
+        "    'rule-set:cn-site':",
         "      - https://223.6.6.6/dns-query",
         "      - https://119.29.29.29/dns-query",
-        "    'geosite:google':",
-        "      - https://8.8.8.8/dns-query#节点选择",
-        "    'geosite:geolocation-!cn':",
+        "    'rule-set:gfw-site':",
         "      - https://1.1.1.1/dns-query#节点选择",
         "      - https://8.8.8.8/dns-query#节点选择",
         "proxies:",
@@ -1603,11 +1655,12 @@ def render_clash(nodes):
         "    url: http://www.gstatic.com/generate_204",
         "    interval: 300",
         "    proxies: [%s]" % ", ".join(names),
-        "rule-providers:",
+        "rule-providers:",   # 全部经代理下载, 避免 GitHub 直连被墙导致规则为空
         "  cn-site:",
         "    type: http",
         "    behavior: domain",
         "    format: mrs",
+        "    proxy: 节点选择",
         "    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-cn.mrs",
         "    path: ./rules/ksing-cn-site.mrs",
         "    interval: 86400",
@@ -1615,6 +1668,7 @@ def render_clash(nodes):
         "    type: http",
         "    behavior: domain",
         "    format: mrs",
+        "    proxy: 节点选择",
         "    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-!cn.mrs",
         "    path: ./rules/ksing-gfw-site.mrs",
         "    interval: 86400",
@@ -1622,6 +1676,7 @@ def render_clash(nodes):
         "    type: http",
         "    behavior: ipcidr",
         "    format: mrs",
+        "    proxy: 节点选择",
         "    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs",
         "    path: ./rules/ksing-cn-ip.mrs",
         "    interval: 86400",
@@ -1756,8 +1811,9 @@ def handle_sub(handler, token):
         return
     nodes = user_nodes(name, u) if u.get("enable") else []
     tr = v["traffic"]
-    info_hdr = {"Subscription-Userinfo": "upload=%d; download=%d; total=0; expire=0"
-                                         % (tr["up"], tr["down"]),
+    info_hdr = {"Subscription-Userinfo": "upload=%d; download=%d; total=%d; expire=%d"
+                                         % (tr["up"], tr["down"],
+                                            v["traffic_limit"], v["expire_at"]),
                 "Profile-Update-Interval": "12"}
     fmt = sub_format(handler)
     if fmt == "clash":
@@ -2033,6 +2089,16 @@ def start_agent_server(s):
     return srv
 
 
+def _janitor():
+    """每分钟维护用户状态 (到期/超额/按月重置), 触发节点配置更新"""
+    while True:
+        time.sleep(60)
+        try:
+            sbtool.sync_user_states(BASE)
+        except Exception:
+            pass
+
+
 def main():
     global BASE
     import argparse
@@ -2049,6 +2115,7 @@ def main():
     port = args.port or int(s.get("panel_port") or 8080)
     get_secret()
     start_agent_server(s)
+    threading.Thread(target=_janitor, daemon=True).start()
     if ":" in listen:
         srv = V6Server((listen, port), Handler)
     else:

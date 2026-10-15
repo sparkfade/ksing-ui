@@ -14,10 +14,11 @@
           <thead>
             <tr>
               <th>用户名</th>
+              <th>状态</th>
               <th>启用</th>
               <th>AnyTLS 密码</th>
               <th>面板登录</th>
-              <th>流量 (上行/下行)</th>
+              <th>流量 (已用/上限)</th>
               <th>备注</th>
               <th style="width: 300px">操作</th>
             </tr>
@@ -25,6 +26,7 @@
           <tbody>
             <tr v-for="u in users" :key="u.name">
               <td><Badge>{{ u.name }}</Badge></td>
+              <td><Badge :color="userStatus(u).color">{{ userStatus(u).text }}</Badge></td>
               <td><Toggle :model-value="u.enable" @update:model-value="toggleEnable(u, $event)" /></td>
               <td>
                 <div class="row" style="gap: 6px">
@@ -36,7 +38,9 @@
                 </div>
               </td>
               <td><Badge :color="u.has_panel_password ? 'green' : 'dim'">{{ u.has_panel_password ? '已设置' : '未设置' }}</Badge></td>
-              <td class="mono">↑{{ fmtBytes(u.traffic?.up) }} ↓{{ fmtBytes(u.traffic?.down) }}</td>
+              <td class="mono" :class="{ 'over-red': trafficOver(u) }">
+                {{ fmtBytes(usedBytes(u)) }} / {{ u.traffic_limit ? fmtBytes(u.traffic_limit) : '不限' }}
+              </td>
               <td class="muted">{{ u.note || '-' }}</td>
               <td>
                 <div class="row" style="gap: 6px">
@@ -44,6 +48,8 @@
                   <Button small @click="openRoute(u)">分流</Button>
                   <Button small @click="openEdit(u)">编辑</Button>
                   <Button small title="重置订阅地址，旧地址立即失效" @click="resetSub(u)">订阅</Button>
+                  <Button small title="当前周期流量清零并恢复使用" @click="resetUsage(u)">流量</Button>
+                  <Button small title="按天数顺延到期时间" @click="openRenew(u)">续期</Button>
                   <Button small variant="danger" @click="del(u)">删除</Button>
                 </div>
               </td>
@@ -128,6 +134,9 @@
       <template v-if="current">
         <div class="form-grid">
           <Input v-model="editForm.note" label="备注" placeholder="备注信息" />
+          <Input v-model.number="editForm.traffic_limit_gb" label="流量限制 (GB)" hint="0 = 不限" type="number" placeholder="0" />
+          <Input v-model="editForm.expire_local" label="到期时间" hint="留空 = 不过期" type="datetime-local" />
+          <Input v-model.number="editForm.reset_day" label="每月重置日" hint="0-31, 0 = 不按月重置" type="number" placeholder="0" />
 
           <div class="field-wide">
             <Toggle v-model="editForm.resetPassword" label="重置 AnyTLS 密码" />
@@ -159,6 +168,16 @@
         <Button variant="primary" :loading="saving" @click="saveEdit">保存</Button>
       </template>
     </Drawer>
+
+    <!-- 续期 -->
+    <Modal v-model:visible="renewVisible" :title="`续期 · ${current?.name ?? ''}`">
+      <Input v-model.number="renewDays" label="顺延天数" hint="从当前到期时间（已过期则从现在）顺延" type="number" placeholder="30" />
+      <p class="muted" style="margin: 10px 0 0; font-size: 12.5px">保存后实时生效，秒级下发到相关节点。</p>
+      <template #footer>
+        <Button @click="renewVisible = false">取消</Button>
+        <Button variant="primary" :loading="renewing" @click="doRenew">续期</Button>
+      </template>
+    </Modal>
   </div>
 </template>
 
@@ -169,6 +188,7 @@ import Button from '@/component/ui/Button.vue'
 import Drawer from '@/component/ui/Drawer.vue'
 import Empty from '@/component/ui/Empty.vue'
 import Input from '@/component/ui/Input.vue'
+import Modal from '@/component/ui/Modal.vue'
 import MultiSelect from '@/component/ui/MultiSelect.vue'
 import Select from '@/component/ui/Select.vue'
 import Spinner from '@/component/ui/Spinner.vue'
@@ -238,12 +258,44 @@ const panelModeOptions = [
 ]
 const editForm = reactive({
   note: '',
+  traffic_limit_gb: 0,
+  expire_local: '',
+  reset_day: 0,
   resetPassword: false,
   password: '',
   panelMode: 'keep',
   panel_password: '',
   refreshToken: false,
 })
+
+const renewVisible = ref(false)
+const renewing = ref(false)
+const renewDays = ref(30)
+
+function usedBytes(u: UserInfo): number {
+  return (u.traffic?.up || 0) + (u.traffic?.down || 0)
+}
+
+function trafficOver(u: UserInfo): boolean {
+  if (u.expire_at && u.expire_at * 1000 < Date.now()) return true
+  const lim = u.traffic_limit || 0
+  return lim > 0 && usedBytes(u) >= lim
+}
+
+function userStatus(u: UserInfo): { color: 'green' | 'red' | 'dim'; text: string } {
+  if (!u.enable) return { color: 'dim', text: '禁用' }
+  if (u.active === false) {
+    if (u.expire_at && u.expire_at * 1000 < Date.now()) return { color: 'red', text: '已过期' }
+    return { color: 'red', text: '已超额' }
+  }
+  return { color: 'green', text: '正常' }
+}
+
+function tsToLocalInput(ts: number): string {
+  const d = new Date(ts * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
 
 async function load() {
   loading.value = true
@@ -381,6 +433,9 @@ function openEdit(u: UserInfo) {
   current.value = u
   Object.assign(editForm, {
     note: u.note,
+    traffic_limit_gb: u.traffic_limit ? +(u.traffic_limit / 1073741824).toFixed(2) : 0,
+    expire_local: u.expire_at ? tsToLocalInput(u.expire_at) : '',
+    reset_day: u.reset_day || 0,
     resetPassword: false,
     password: '',
     panelMode: 'keep',
@@ -401,6 +456,9 @@ async function saveEdit() {
   const u = current.value
   if (!u) return
   const body: Record<string, unknown> = { note: editForm.note }
+  body.traffic_limit = Math.round((Number(editForm.traffic_limit_gb) || 0) * 1073741824)
+  body.expire_at = editForm.expire_local ? Math.floor(new Date(editForm.expire_local).getTime() / 1000) : 0
+  body.reset_day = Math.min(31, Math.max(0, Math.round(Number(editForm.reset_day) || 0)))
   if (editForm.resetPassword) body.password = editForm.password || genPassword()
   if (editForm.panelMode === 'set') {
     if (!editForm.panel_password) {
@@ -434,6 +492,44 @@ async function resetSub(u: UserInfo) {
     load()
   } catch (e) {
     toast((e as Error).message, 'error')
+  }
+}
+
+async function resetUsage(u: UserInfo) {
+  if (!(await confirmDialog(`重置用户「${u.name}」的当前周期流量？\n流量清零并恢复使用。`))) return
+  try {
+    await post(`/api/users/${encodeURIComponent(u.name)}/reset_usage`)
+    toast('流量已重置，已自动下发到相关节点', 'success')
+    load()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  }
+}
+
+function openRenew(u: UserInfo) {
+  current.value = u
+  renewDays.value = 30
+  renewVisible.value = true
+}
+
+async function doRenew() {
+  const u = current.value
+  if (!u) return
+  const days = Math.round(Number(renewDays.value))
+  if (!Number.isInteger(days) || days < 1) {
+    toast('请输入有效的顺延天数', 'error')
+    return
+  }
+  renewing.value = true
+  try {
+    await put(`/api/users/${encodeURIComponent(u.name)}`, { renew_days: days })
+    toast(`已为 ${u.name} 续期 ${days} 天，已自动下发到相关节点`, 'success')
+    renewVisible.value = false
+    load()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    renewing.value = false
   }
 }
 
@@ -507,6 +603,11 @@ onMounted(load)
 .hint {
   margin: 12px 0 0;
   font-size: 12.5px;
+}
+
+.over-red {
+  color: var(--c-red);
+  font-weight: 600;
 }
 
 .field-wide {

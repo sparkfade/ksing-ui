@@ -561,6 +561,10 @@ def load_users(base):
         u.setdefault("note", "")
         u.setdefault("created_at", 0)
         u.setdefault("sv", 0)  # 会话版本: 密码变更/禁用后递增使旧令牌失效
+        u.setdefault("traffic_limit", 0)  # 流量总量限制(字节), 0=不限
+        u.setdefault("expire_at", 0)      # 到期时间戳, 0=不过期
+        u.setdefault("reset_day", 0)      # 每月几号重置流量 (0=不重置)
+        u.setdefault("exceeded", False)   # 内部: 已超额/已到期被踢出下发 (自动管理)
     return out
 
 def save_users(base, users):
@@ -796,8 +800,8 @@ def server_insecure(srv):
 
 
 def server_users(base, srv):
-    """该节点实际下发的用户 {name: user} (交集: 启用用户 ∩ 节点分配用户; 空列表=全部)"""
-    users = {k: u for k, u in load_users(base).items() if u.get("enable", True)}
+    """该节点实际下发的用户 {name: user} (交集: 可用用户 ∩ 节点分配用户; 空列表=全部)"""
+    users = {k: u for k, u in load_users(base).items() if user_active(base, k, u)}
     want = [u for u in srv.get("users", []) if u]
     if not want:
         return users
@@ -1059,7 +1063,86 @@ def load_traffic(base):
     t = load_json(paths(base)["traffic"], {})
     t.setdefault("users", {})
     t.setdefault("servers", {})
+    t.setdefault("offsets", {})  # 用户流量周期偏移: {name: {up, down, since}}
     return t
+
+
+def period_start(reset_day, now=None):
+    """最近一个"每月 reset_day 日"的起点时间戳"""
+    import datetime
+    n = datetime.datetime.fromtimestamp(now or time.time())
+    if n.day >= reset_day:
+        p = n.replace(day=reset_day, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        p = (n.replace(day=1) - datetime.timedelta(days=1)).replace(
+            day=reset_day, hour=0, minute=0, second=0, microsecond=0)
+    return p.timestamp()
+
+
+def effective_usage(base, name, t=None):
+    """用户当前周期已用流量 (总计 - 重置偏移)"""
+    t = t or load_traffic(base)
+    tot = t["users"].get(name, {})
+    off = t["offsets"].get(name, {})
+    return {"up": max(0, tot.get("up", 0) - off.get("up", 0)),
+            "down": max(0, tot.get("down", 0) - off.get("down", 0))}
+
+
+def user_active(base, name, u, t=None):
+    """用户是否可下发/可订阅: 启用 且未超额到期 且未过期 且未超流量"""
+    if not u.get("enable", True):
+        return False
+    if u.get("exceeded"):
+        return False
+    exp = u.get("expire_at") or 0
+    if exp and exp < time.time():
+        return False
+    limit = int(u.get("traffic_limit") or 0)
+    if limit > 0:
+        used = effective_usage(base, name, t)
+        if used["up"] + used["down"] >= limit:
+            return False
+    return True
+
+
+def sync_user_states(base):
+    """按月重置流量 + 到期/超额自动踢出与恢复 (users.json 变化会触发节点重新拉配置)"""
+    import fcntl
+    P = paths(base)
+    now = time.time()
+    with open(P["traffic"] + ".lock", "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            users = load_users(base)
+            t = load_traffic(base)
+            u_changed = False
+            t_changed = False
+            for name, u in users.items():
+                rd = int(u.get("reset_day") or 0)
+                if rd and 1 <= rd <= 31:
+                    ps = period_start(rd, now)
+                    off = t["offsets"].get(name)
+                    if not off or off.get("since", 0) < ps:
+                        tot = t["users"].get(name, {})
+                        t["offsets"][name] = {"up": tot.get("up", 0),
+                                              "down": tot.get("down", 0), "since": now}
+                        t_changed = True
+                if not u.get("enable", True):
+                    continue
+                exp = u.get("expire_at") or 0
+                limit = int(u.get("traffic_limit") or 0)
+                used = effective_usage(base, name, t)
+                should_block = bool((exp and exp < now)
+                                    or (limit and used["up"] + used["down"] >= limit))
+                if should_block != bool(u.get("exceeded")):
+                    u["exceeded"] = should_block
+                    u_changed = True
+            if t_changed:
+                save_json(P["traffic"], t)
+            if u_changed:
+                save_users(base, users)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 # ---------------------------------------------------------------- set
 

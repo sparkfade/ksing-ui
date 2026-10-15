@@ -6,8 +6,8 @@
       <div class="card hero">
         <h2>你好，{{ me.name }}</h2>
         <p class="muted">这是你的 AnyTLS 代理接入信息。</p>
-        <div v-if="!me.enable" class="tip-bar" style="margin: 12px 0 0">
-          账号已被禁用，如有疑问请联系管理员。
+        <div v-if="inactiveReason" class="tip-bar" style="margin: 12px 0 0">
+          账号不可用: {{ inactiveReason }}，请联系管理员。
         </div>
       </div>
 
@@ -43,6 +43,9 @@
 
         <h4 class="sec">账号信息</h4>
         <div class="kv"><span class="k">已用流量</span><span class="v mono">{{ fmtBytes((me.traffic?.up || 0) + (me.traffic?.down || 0)) }}</span></div>
+        <div class="kv"><span class="k">流量上限</span><span class="v mono">{{ me.traffic_limit ? fmtBytes(me.traffic_limit) : '不限' }}</span></div>
+        <div class="kv"><span class="k">到期时间</span><span class="v mono">{{ me.expire_at ? fmtTime(me.expire_at) : '永久' }}</span></div>
+        <div v-if="me.reset_day" class="kv"><span class="k">流量重置</span><span class="v">每月 {{ me.reset_day }} 号重置</span></div>
         <div class="kv"><span class="k">服务器端口</span><span class="v mono">{{ me.server_port }}</span></div>
         <div class="kv"><span class="k">SNI</span><span class="v mono">{{ me.sni || '-' }}</span></div>
         <div class="kv"><span class="k">当前出口</span><span class="v"><Badge :color="me.exit === 'reject' ? 'red' : me.exit === 'direct' ? 'dim' : 'cyan'">{{ me.exit }}</Badge></span></div>
@@ -77,7 +80,7 @@ import { get, post } from '@/util/request'
 import { toast } from '@/util/toast'
 import { confirmDialog } from '@/util/confirm'
 import { auth, login } from '@/util/auth'
-import { fmtBytes } from '@/util/format'
+import { fmtBytes, fmtTime } from '@/util/format'
 import type { MeInfo, SubUrls } from '@/types'
 
 const me = ref<MeInfo>()
@@ -120,6 +123,17 @@ function subEntriesOf(u: { sub_url: string; sub_urls?: SubUrls }): Array<{ key: 
 }
 
 const subEntries = computed(() => (me.value ? subEntriesOf(me.value) : []))
+
+const inactiveReason = computed(() => {
+  const m = me.value
+  if (!m) return ''
+  if (!m.enable) return '被禁用'
+  if (m.active === false) {
+    if (m.expire_at && m.expire_at * 1000 < Date.now()) return '已到期'
+    return '已超额'
+  }
+  return ''
+})
 
 async function load() {
   loading.value = true
