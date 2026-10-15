@@ -46,8 +46,6 @@
         <div class="kv"><span class="k">流量上限</span><span class="v mono">{{ me.traffic_limit ? fmtBytes(me.traffic_limit) : '不限' }}</span></div>
         <div class="kv"><span class="k">到期时间</span><span class="v mono">{{ me.expire_at ? fmtTime(me.expire_at) : '永久' }}</span></div>
         <div v-if="me.reset_day" class="kv"><span class="k">流量重置</span><span class="v">每月 {{ me.reset_day }} 号重置</span></div>
-        <div class="kv"><span class="k">服务器端口</span><span class="v mono">{{ me.server_port }}</span></div>
-        <div class="kv"><span class="k">SNI</span><span class="v mono">{{ me.sni || '-' }}</span></div>
         <div class="kv"><span class="k">当前出口</span><span class="v"><Badge :color="me.exit === 'reject' ? 'red' : me.exit === 'direct' ? 'dim' : 'cyan'">{{ me.exit }}</Badge></span></div>
         <div class="kv"><span class="k">专属规则数</span><span class="v">{{ me.my_rules }}</span></div>
         <div class="kv"><span class="k">账号状态</span><span class="v"><Badge :color="me.enable ? 'green' : 'red'">{{ me.enable ? '正常' : '已禁用' }}</Badge></span></div>

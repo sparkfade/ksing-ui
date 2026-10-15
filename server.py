@@ -51,7 +51,7 @@ TOKEN_TTL = 7 * 86400
 
 BASE = os.environ.get("SBTOOL_DIR") or os.path.join(ROOT, "sbdata")
 
-PROC_LOCK = threading.Lock()
+PROC_LOCK = threading.RLock()  # 可重入: handler 持锁内还会调 sync_user_states
 
 
 # ------------------------------------------------------------------ helpers
@@ -300,6 +300,7 @@ def server_view(sid, srv, traffic=None):
         "desired_hash": want,
         "synced": bool(applied and want and applied == want),
         "agent_version": srv.get("agent_version", ""),
+        "last_error": srv.get("last_error", ""),
         "traffic": {"up": t.get("up", 0), "down": t.get("down", 0)},
     }
 
@@ -1306,6 +1307,7 @@ def h_agent_config(ctx):
         wait = min(max(int(ctx.query.get("wait") or 0), 0), 45)
     except ValueError:
         wait = 0
+    touch_server(ctx.sid, last_seen=int(time.time()), reported_ip=ctx.client_ip)  # 心跳前置
     if wait:  # 限制单节点并发长轮询, 防被攻陷 token 耗尽面板线程
         with _CONFPULL_LOCK:
             n = _CONFPULL.get(ctx.sid, 0)
@@ -1414,6 +1416,7 @@ def h_agent_report(ctx):
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
+              "last_error": str(b.get("last_error") or "")[:300],
               "reported_ip": ctx.client_ip}
     cert = b.get("cert")
     if isinstance(cert, dict):  # agent 上报的证书状态

@@ -86,7 +86,7 @@
     <!-- 添加规则 -->
     <Drawer v-model:visible="addVisible" title="添加规则" width="480px">
       <p class="muted" style="margin: 0 0 14px; font-size: 12.5px">
-        各条件之间为「与」关系；全部留空则匹配所有流量。规则按顺序匹配。
+        各条件之间为「与」关系，至少需要一个匹配条件（规则集/域名/IP/端口）。规则按顺序匹配。
       </p>
 
       <div class="form-grid">
@@ -394,6 +394,10 @@ async function saveRule() {
       return
     }
     body.port = ports
+  }
+  if (!Object.keys(body).length) {
+    toast('至少需要一个匹配条件（规则集/域名/IP/端口）', 'error')
+    return
   }
   if (form.users.length) body.users = form.users
   if (form.nodes.length) body.nodes = form.nodes

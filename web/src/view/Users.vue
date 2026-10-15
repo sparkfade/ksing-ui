@@ -66,6 +66,9 @@
         <Input v-model="addForm.password" label="AnyTLS 密码" hint="留空自动生成" placeholder="可留空" />
         <Input v-model="addForm.panel_password" label="面板登录密码" hint="留空则不能登录面板" placeholder="可留空" />
         <Input v-model="addForm.note" label="备注" placeholder="可留空" />
+        <Input v-model.number="addForm.traffic_limit_gb" label="流量限制 (GB)" hint="0 = 不限" type="number" placeholder="0" />
+        <Input v-model="addForm.expire_local" label="到期时间" hint="留空 = 不过期" type="datetime-local" />
+        <Input v-model.number="addForm.reset_day" label="每月重置日" hint="0-31, 0 = 不按月重置" type="number" placeholder="0" />
       </div>
       <template #footer>
         <Button @click="addVisible = false">取消</Button>
@@ -158,8 +161,11 @@
           />
 
           <div class="field-wide">
-            <Toggle v-model="editForm.refreshToken" label="刷新订阅 token" />
-            <p v-if="editForm.refreshToken" class="warn">保存后旧订阅链接将立即失效，需重新分发。</p>
+            <span class="lbl">订阅链接</span>
+            <div class="row" style="margin-top: 6px">
+              <Button small @click="resetSubToken">重置订阅链接</Button>
+              <span class="muted" style="font-size: 12.5px">立即生效，旧订阅链接失效，需重新分发</span>
+            </div>
           </div>
         </div>
       </template>
@@ -217,7 +223,15 @@ const servers = ref<ServerItem[]>([])
 const nodeTags = ref<string[]>([])
 
 const addVisible = ref(false)
-const addForm = reactive({ name: '', password: '', panel_password: '', note: '' })
+const addForm = reactive({
+  name: '',
+  password: '',
+  panel_password: '',
+  note: '',
+  traffic_limit_gb: 0,
+  expire_local: '',
+  reset_day: 0,
+})
 
 const linkVisible = ref(false)
 const editVisible = ref(false)
@@ -265,7 +279,6 @@ const editForm = reactive({
   password: '',
   panelMode: 'keep',
   panel_password: '',
-  refreshToken: false,
 })
 
 const renewVisible = ref(false)
@@ -295,6 +308,14 @@ function tsToLocalInput(ts: number): string {
   const d = new Date(ts * 1000)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function quotaFields(gb: number | string, local: string, day: number | string): Record<string, number> {
+  return {
+    traffic_limit: Math.round((Number(gb) || 0) * 1073741824),
+    expire_at: local ? Math.floor(new Date(local).getTime() / 1000) : 0,
+    reset_day: Math.min(31, Math.max(0, Math.round(Number(day) || 0))),
+  }
 }
 
 async function load() {
@@ -333,7 +354,7 @@ async function toggleEnable(u: UserInfo, enable: boolean) {
 }
 
 function openAdd() {
-  Object.assign(addForm, { name: '', password: '', panel_password: '', note: '' })
+  Object.assign(addForm, { name: '', password: '', panel_password: '', note: '', traffic_limit_gb: 0, expire_local: '', reset_day: 0 })
   addVisible.value = true
 }
 
@@ -344,10 +365,11 @@ async function addUser() {
   }
   saving.value = true
   try {
-    const body: Record<string, string> = { name: addForm.name.trim() }
+    const body: Record<string, unknown> = { name: addForm.name.trim() }
     if (addForm.password) body.password = addForm.password
     if (addForm.panel_password) body.panel_password = addForm.panel_password
     if (addForm.note) body.note = addForm.note
+    Object.assign(body, quotaFields(addForm.traffic_limit_gb, addForm.expire_local, addForm.reset_day))
     const r = await post<{ ok: boolean; password: string }>('/api/users', body)
     toast(`用户已创建，AnyTLS 密码: ${r.password}`, 'success')
     addVisible.value = false
@@ -440,7 +462,6 @@ function openEdit(u: UserInfo) {
     password: '',
     panelMode: 'keep',
     panel_password: '',
-    refreshToken: false,
   })
   editVisible.value = true
 }
@@ -456,9 +477,7 @@ async function saveEdit() {
   const u = current.value
   if (!u) return
   const body: Record<string, unknown> = { note: editForm.note }
-  body.traffic_limit = Math.round((Number(editForm.traffic_limit_gb) || 0) * 1073741824)
-  body.expire_at = editForm.expire_local ? Math.floor(new Date(editForm.expire_local).getTime() / 1000) : 0
-  body.reset_day = Math.min(31, Math.max(0, Math.round(Number(editForm.reset_day) || 0)))
+  Object.assign(body, quotaFields(editForm.traffic_limit_gb, editForm.expire_local, editForm.reset_day))
   if (editForm.resetPassword) body.password = editForm.password || genPassword()
   if (editForm.panelMode === 'set') {
     if (!editForm.panel_password) {
@@ -469,7 +488,6 @@ async function saveEdit() {
   } else if (editForm.panelMode === 'clear') {
     body.panel_password = ''
   }
-  if (editForm.refreshToken) body.refresh_token = true
 
   saving.value = true
   try {
@@ -493,6 +511,10 @@ async function resetSub(u: UserInfo) {
   } catch (e) {
     toast((e as Error).message, 'error')
   }
+}
+
+async function resetSubToken() {
+  if (current.value) await resetSub(current.value)
 }
 
 async function resetUsage(u: UserInfo) {
@@ -610,13 +632,12 @@ onMounted(load)
   font-weight: 600;
 }
 
-.field-wide {
-  grid-column: 1 / -1;
+.lbl {
+  font-size: 12.5px;
+  color: var(--c-text-dim);
 }
 
-.warn {
-  margin: 8px 0 0;
-  color: var(--c-yellow);
-  font-size: 12.5px;
+.field-wide {
+  grid-column: 1 / -1;
 }
 </style>

@@ -34,7 +34,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -57,6 +57,7 @@ PUSH_INTERVAL = int(_C.get("push_interval", 10))
 STATE_PATH = os.path.join(DIR, "agent-state.json")
 RULESET_DIR = os.path.join(DIR, "rulesets")
 HEALTH = {"ok_at": time.time()}  # 看门狗: 面板通信连续失败则退出让 systemd 重启
+LAST_ERROR = [""]  # 最近一次错误, 随上报带给面板 (列表包一层便于跨线程改写)
 
 
 def log(msg):
@@ -515,11 +516,13 @@ def report(state):
         "stats": stats,
         "applied_hash": state.get("hash", ""),
         "agent_version": VERSION,
+        "last_error": LAST_ERROR[0],
     }
     ci = cert_info()
     if ci:
         body["cert"] = ci
     api_json("POST", "/agent/report", body)
+    LAST_ERROR[0] = ""
     if stats:
         total = sum(p[0] + p[1] for p in stats.values())
         log("已上报流量: %d 用户, 合计 %d 字节" % (len(stats), total))
@@ -533,6 +536,7 @@ def pull_loop(state):
             if ok is None:
                 time.sleep(PULL_INTERVAL)  # 应用失败退避, 防热循环
         except Exception as e:  # noqa: BLE001
+            LAST_ERROR[0] = str(e)[:300]
             log("拉取配置失败: %s" % e)
             time.sleep(PULL_INTERVAL)  # 出错退避
 
@@ -571,6 +575,7 @@ def main():
                 report(state)
                 next_push = now + PUSH_INTERVAL
         except Exception as e:  # noqa: BLE001
+            LAST_ERROR[0] = str(e)[:300]
             log("上报失败: %s" % e)
             next_push = now + PUSH_INTERVAL
         time.sleep(2)

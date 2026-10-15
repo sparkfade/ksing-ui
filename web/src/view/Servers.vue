@@ -58,7 +58,10 @@
                 <Badge v-else color="cyan" :title="s.users.join('\n')" style="cursor: default">{{ s.users.length }} 人</Badge>
               </td>
               <td class="mono">↑{{ fmtBytes(s.traffic?.up) }} ↓{{ fmtBytes(s.traffic?.down) }}</td>
-              <td class="muted">{{ fmtAgo(s.last_seen) }}</td>
+              <td class="muted">
+                {{ fmtAgo(s.last_seen) }}
+                <div v-if="s.last_error" class="last-err" :title="s.last_error">⚠ {{ truncate(s.last_error, 40) }}</div>
+              </td>
               <td>
                 <div class="row" style="gap: 6px">
                   <Button small @click="openEdit(s)">编辑</Button>
@@ -227,6 +230,10 @@ const cfgText = computed(() => (cfg.value ? JSON.stringify(cfg.value.config, nul
 
 function certModeLabel(m: ServerItem['cert_mode']): string {
   return { acme: '域名证书', selfip: 'IP 自签', unsafe: '不安全' }[m || 'selfip']
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) + '…' : text
 }
 
 function certModeColor(m: ServerItem['cert_mode']): 'green' | 'yellow' | 'red' {
@@ -460,5 +467,15 @@ onUnmounted(() => clearInterval(timer))
   margin: 0;
   font-size: 12.5px;
   padding-bottom: 8px;
+}
+
+.last-err {
+  color: var(--c-red);
+  font-size: 11.5px;
+  margin-top: 3px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

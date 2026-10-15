@@ -51,6 +51,7 @@ export interface ServerItem {
   last_seen: number
   online: boolean
   agent_version: string
+  last_error: string
   applied_hash: string
   desired_hash: string
   synced: boolean
@@ -103,7 +104,7 @@ export interface CertItem {
   cert_mode: '' | 'acme' | 'selfip' | 'unsafe'
   issuer: string
   not_after: number
-  days_left: number
+  days_left: number | null
   status: 'pending' | 'ok' | 'expiring' | 'expired'
   online: boolean
 }

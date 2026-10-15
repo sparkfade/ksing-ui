@@ -770,6 +770,7 @@ def load_servers(base):
         srv.setdefault("last_seen", 0)
         srv.setdefault("applied_hash", "")
         srv.setdefault("agent_version", "")
+        srv.setdefault("last_error", "")
         srv.setdefault("cert_not_after", 0)  # agent 上报的证书过期时间 (unix 秒)
         srv.setdefault("cert_issuer", "")
         out[sid] = srv
@@ -1111,16 +1112,17 @@ def user_active(base, name, u, t=None):
 
 def sync_user_states(base, users_lock=None):
     """按月重置流量 + 到期/超额自动踢出与恢复 (users.json 变化会触发节点重新拉配置)。
-    users_lock: 多进程/多线程环境下 users.json 的写锁 (如面板的 PROC_LOCK)"""
+    分两阶段: traffic.json 用 flock; users.json 用 users_lock。锁顺序固定, 不嵌套反向。"""
     import fcntl
     P = paths(base)
     now = time.time()
+    block_map = {}
+    # 阶段 1: traffic (flock)
     with open(P["traffic"] + ".lock", "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             users = load_users(base)
             t = load_traffic(base)
-            u_changed = False
             t_changed = False
             for name, u in users.items():
                 rd = int(u.get("reset_day") or 0)
@@ -1137,21 +1139,30 @@ def sync_user_states(base, users_lock=None):
                 exp = u.get("expire_at") or 0
                 limit = int(u.get("traffic_limit") or 0)
                 used = effective_usage(base, name, t)
-                should_block = bool((exp and exp < now)
-                                    or (limit and used["up"] + used["down"] >= limit))
-                if should_block != bool(u.get("exceeded")):
-                    u["exceeded"] = should_block
-                    u_changed = True
+                block_map[name] = bool((exp and exp < now)
+                                       or (limit and used["up"] + used["down"] >= limit))
             if t_changed:
                 save_json(P["traffic"], t)
-            if u_changed:
-                if users_lock:
-                    with users_lock:
-                        save_users(base, users)
-                else:
-                    save_users(base, users)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+    # 阶段 2: users (users_lock)
+    def _flip():
+        users = load_users(base)
+        changed = False
+        for name, should_block in block_map.items():
+            u = users.get(name)
+            if u is None:
+                continue
+            if should_block != bool(u.get("exceeded")):
+                u["exceeded"] = should_block
+                changed = True
+        if changed:
+            save_users(base, users)
+    if users_lock:
+        with users_lock:
+            _flip()
+    else:
+        _flip()
 
 
 def reset_user_usage(base, name):

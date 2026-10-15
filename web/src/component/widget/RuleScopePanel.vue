@@ -150,6 +150,10 @@ async function addRule() {
     }
     body.port = ports
   }
+  if (!Object.keys(body).length) {
+    toast('至少需要一个匹配条件（规则集/域名/IP/端口）', 'error')
+    return
+  }
   if (props.userName) body.users = [props.userName]
   if (props.nodeSid) body.nodes = [props.nodeSid]
   if (form.reject) body.action = 'reject'

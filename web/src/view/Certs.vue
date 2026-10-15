@@ -75,7 +75,7 @@ function statusColor(s: CertItem['status']): 'green' | 'yellow' | 'red' | 'dim' 
 function statusText(c: CertItem): string {
   if (c.status === 'pending') return '申请中/未上报'
   if (c.status === 'expired') return '已过期'
-  return `剩 ${c.days_left} 天`
+  return `剩 ${Math.round(c.days_left ?? 0)} 天`
 }
 
 async function load() {
