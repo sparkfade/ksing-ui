@@ -3,7 +3,8 @@
 # 用法(由面板生成, 含脚本哈希与 CA 指纹校验):
 #   curl -fsSLk '<面板>/agent/install.sh' -o /tmp/ks-i.sh \
 #     && echo '<脚本sha256>  /tmp/ks-i.sh' | sha256sum -c \
-#     && bash /tmp/ks-i.sh '<面板url>' '<sid>' '<token>' '<CA指纹sha256>'
+#     && bash /tmp/ks-i.sh '<面板url>' '<sid>' '<安装令牌>' '<CA指纹sha256>'
+# 第 3 个参数是一次性安装令牌: 兑换成永久节点令牌后立即作废, 重放安装命令无效
 set -euo pipefail
 
 PANEL_URL="${1:?缺少面板地址}"
@@ -76,8 +77,18 @@ else
 fi
 PINNED_URL="https://ksing-panel-agent:$PPORT"
 
-echo "[1/5] 下载 sing-box ($ARCH) ..."
+# 一次性安装令牌兑换永久节点令牌: 每个安装命令只能执行一次, 兑换即作废
 if [ "$USE_PANEL_CA" = "1" ]; then API_URL="$PINNED_URL"; else API_URL="$PANEL_URL"; fi
+echo "[0/5] 兑换永久节点令牌 (安装令牌一次性, 已自动作废) ..."
+ACT="$($CURL -X POST -H "Authorization: Bearer $TOKEN" "$API_URL/agent/activate")" || {
+  echo "!! 安装令牌无效或已被使用 (每个安装命令只能执行一次)。"
+  echo "!! 请在面板对该节点执行「重新部署」获取新的安装命令。"
+  exit 1
+}
+TOKEN="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' <<<"$ACT")"
+[[ "$TOKEN" =~ ^[0-9a-f]{64}$ ]] || { echo "令牌兑换响应异常: ${ACT:0:200}"; exit 1; }
+
+echo "[1/5] 下载 sing-box ($ARCH) ..."
 $CURL -H "Authorization: Bearer $TOKEN" "$API_URL/agent/binary/$ARCH" -o "$BIN.new"
 chmod 755 "$BIN.new"
 mv "$BIN.new" "$BIN"
@@ -145,12 +156,12 @@ cat > /etc/systemd/system/k-sing.service <<EOF
 Description=k-sing (ksing node)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=$BIN run -c $DIR/config.json
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 LimitNOFILE=1048576
 
 [Install]
@@ -161,22 +172,39 @@ cat > /etc/systemd/system/ksing-agent.service <<EOF
 Description=ksing-ui node agent
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=$PYBIN $DIR/agent.py
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 
+# 重新部署场景: 先停旧服务, 避免 --once 与运行中的 agent 触发单实例锁冲突
+systemctl stop ksing-agent k-sing 2>/dev/null || true
+
 # 首次拉取配置 (生成 $DIR/config.json) 后启动
 if $PYBIN "$DIR/agent.py" --once; then
   systemctl enable --now k-sing ksing-agent
-  echo "完成: 节点已接入面板并在线。"
+  sleep 3
+  BAD=0
+  for u in k-sing ksing-agent; do
+    if ! systemctl is-active --quiet "$u"; then
+      echo "!! $u 未能正常运行, 最近日志:"
+      journalctl -u "$u" -n 30 --no-pager 2>/dev/null || true
+      BAD=1
+    fi
+  done
+  if [ "$BAD" = "0" ]; then
+    echo "完成: 节点已接入面板并在线。"
+  else
+    echo "请根据上方日志排查; 修复后执行: systemctl restart k-sing ksing-agent"
+    exit 1
+  fi
 else
   echo "首次配置拉取失败, 请检查面板连通性后重试: $PYBIN $DIR/agent.py --once"
   exit 1

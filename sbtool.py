@@ -755,6 +755,7 @@ def load_servers(base):
         srv = dict(v)
         srv.setdefault("name", sid)
         srv.setdefault("token_hash", "")
+        srv.setdefault("install_hash", "")      # 一次性安装令牌哈希 (激活兑换后移除)
         srv.setdefault("port", 443)
         srv.setdefault("sni", "")
         srv.setdefault("domain", "")           # 节点域名 (acme 模式必填, 用户已自行解析到节点 IP)

@@ -43,6 +43,11 @@ for _f in (sys.stdout, sys.stderr):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sbtool  # noqa: E402
 
+# sbtool 为 CLI 管道把 SIGPIPE 恢复成了默认处置(终止进程); 面板是服务进程,
+# 必须重新忽略: 客户端提前断开时写 socket 只应抛 BrokenPipeError (已被捕获),
+# 否则一个提前关闭的连接就能让 SIGPIPE 杀掉整个面板 (未认证远程 DoS)
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIST = os.path.join(ROOT, "web", "dist")
 PANEL_NAME = "KSING-UI"
@@ -125,10 +130,25 @@ def check_session(user, role):
 LOGIN_FAILS = {}  # ip -> [失败时间戳...], 登录/初始化限流
 LOGIN_WINDOW = 300
 LOGIN_MAX_FAILS = 10
+LOGIN_MAX_TRACKED = 10000  # 最多跟踪的 IP 数 (防海量源 IP 如 IPv6 把内存撑爆)
+
+
+def _prune_login_fails(now):
+    """条目超限时清理过期/最旧记录 (迭代前快照, 防并发修改)"""
+    if len(LOGIN_FAILS) <= LOGIN_MAX_TRACKED:
+        return
+    for ip, ts in list(LOGIN_FAILS.items()):
+        if not ts or now - ts[-1] > LOGIN_WINDOW:
+            LOGIN_FAILS.pop(ip, None)
+    if len(LOGIN_FAILS) > LOGIN_MAX_TRACKED:
+        oldest = sorted(LOGIN_FAILS.items(), key=lambda kv: kv[1][-1] if kv[1] else 0)
+        for ip, _ in oldest[: len(oldest) // 2]:
+            LOGIN_FAILS.pop(ip, None)
 
 
 def rate_limit_check(ip):
     now = time.time()
+    _prune_login_fails(now)
     fails = [t for t in LOGIN_FAILS.get(ip, []) if now - t < LOGIN_WINDOW]
     LOGIN_FAILS[ip] = fails
     if len(fails) >= LOGIN_MAX_FAILS:
@@ -136,6 +156,7 @@ def rate_limit_check(ip):
 
 
 def rate_limit_fail(ip):
+    _prune_login_fails(time.time())
     LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
 
@@ -201,6 +222,22 @@ def auth_agent(headers):
                 raise ApiError("节点已禁用", 403)
             return sid, srv, token
     raise ApiError("令牌无效", 401)
+
+
+def auth_agent_install(headers):
+    """安装令牌认证: 一次性, 仅供 /agent/activate 兑换永久节点令牌"""
+    auth = headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise ApiError("未认证", 401)
+    token = auth[7:].strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise ApiError("令牌非法", 401)
+    ih = sbtool.hash_server_token(token)
+    servers = sbtool.load_servers(BASE)
+    for sid, srv in servers.items():
+        if srv.get("install_hash") and hmac.compare_digest(ih, srv["install_hash"]):
+            return sid, srv, token
+    raise ApiError("安装令牌无效或已使用", 401)
 
 
 def touch_server(sid, **fields):
@@ -300,6 +337,7 @@ def server_view(sid, srv, traffic=None):
         "desired_hash": want,
         "synced": bool(applied and want and applied == want),
         "agent_version": srv.get("agent_version", ""),
+        "sb_running": srv.get("sb_running"),
         "last_error": srv.get("last_error", ""),
         "traffic": {"up": t.get("up", 0), "down": t.get("down", 0)},
     }
@@ -540,68 +578,71 @@ def h_nodes_add(ctx):
     if b.get("plugin"):
         node["plugin"] = b["plugin"]
         node["plugin_opts"] = b.get("plugin_opts", "")
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
-    call_sbtool(sbtool.add_node, nodes, tag, node, force=bool(b.get("force")))
-    sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
+    with PROC_LOCK:
+        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        call_sbtool(sbtool.add_node, nodes, tag, node, force=bool(b.get("force")))
+        sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"ok": True}
 
 
 def h_nodes_update(ctx):
     tag = ctx.match.group(1)
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
-    if tag not in nodes:
-        raise ApiError("节点不存在", 404)
-    b = ctx.body
-    node = nodes[tag]
-    for k in ("server", "method", "password", "plugin", "plugin_opts"):
-        if k in b:
-            node[k] = b[k]
-    if "server_port" in b:
-        node["server_port"] = int(b["server_port"])
-    if "udp_over_tcp" in b:
-        if b["udp_over_tcp"]:
-            node["udp_over_tcp"] = True
-        else:
-            node.pop("udp_over_tcp", None)
-    call_sbtool(sbtool.validate_node, node["method"], node["password"], node["server_port"])
-    new_tag = (b.get("new_tag") or "").strip()
-    if new_tag and new_tag != tag:
-        if new_tag in nodes or new_tag in ("direct", "block", "dns-out"):
-            raise ApiError("新 tag 不可用")
-        del nodes[tag]
-        nodes[new_tag] = node
-        # 同步引用该 tag 的分流规则
-        rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
-        changed = False
-        for r in rc.get("rules", []):
-            if r.get("outbound") == tag:
-                r["outbound"] = new_tag
+    with PROC_LOCK:
+        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        if tag not in nodes:
+            raise ApiError("节点不存在", 404)
+        b = ctx.body
+        node = nodes[tag]
+        for k in ("server", "method", "password", "plugin", "plugin_opts"):
+            if k in b:
+                node[k] = b[k]
+        if "server_port" in b:
+            node["server_port"] = int(b["server_port"])
+        if "udp_over_tcp" in b:
+            if b["udp_over_tcp"]:
+                node["udp_over_tcp"] = True
+            else:
+                node.pop("udp_over_tcp", None)
+        call_sbtool(sbtool.validate_node, node["method"], node["password"], node["server_port"])
+        new_tag = (b.get("new_tag") or "").strip()
+        if new_tag and new_tag != tag:
+            if new_tag in nodes or new_tag in ("direct", "block", "dns-out"):
+                raise ApiError("新 tag 不可用")
+            del nodes[tag]
+            nodes[new_tag] = node
+            # 同步引用该 tag 的分流规则
+            rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
+            changed = False
+            for r in rc.get("rules", []):
+                if r.get("outbound") == tag:
+                    r["outbound"] = new_tag
+                    changed = True
+            if rc.get("final") == tag:
+                rc["final"] = new_tag
                 changed = True
-        if rc.get("final") == tag:
-            rc["final"] = new_tag
-            changed = True
-        for u, t in rc.get("user_final", {}).items():
-            if t == tag:
-                rc["user_final"][u] = new_tag
-                changed = True
-        if changed:
-            sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
-    sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
+            for u, t in rc.get("user_final", {}).items():
+                if t == tag:
+                    rc["user_final"][u] = new_tag
+                    changed = True
+            if changed:
+                sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+        sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"ok": True}
 
 
 def h_nodes_del(ctx):
     tag = ctx.match.group(1)
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
-    if tag not in nodes:
-        raise ApiError("节点不存在", 404)
-    # 检查引用
-    rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
-    refs = [i for i, r in enumerate(rc.get("rules", [])) if r.get("outbound") == tag]
-    if rc.get("final") == tag or tag in rc.get("user_final", {}).values() or refs:
-        raise ApiError("节点仍被分流规则/默认出口引用, 请先调整相关规则")
-    del nodes[tag]
-    sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
+    with PROC_LOCK:
+        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        if tag not in nodes:
+            raise ApiError("节点不存在", 404)
+        # 检查引用
+        rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
+        refs = [i for i, r in enumerate(rc.get("rules", [])) if r.get("outbound") == tag]
+        if rc.get("final") == tag or tag in rc.get("user_final", {}).values() or refs:
+            raise ApiError("节点仍被分流规则/默认出口引用, 请先调整相关规则")
+        del nodes[tag]
+        sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"ok": True}
 
 
@@ -610,35 +651,36 @@ def h_nodes_import(ctx):
     links = [l.strip() for l in text.splitlines() if l.strip().lower().startswith("ss://")]
     if not links:
         raise ApiError("未找到 ss:// 链接")
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
     results = []
-    for link in links:
-        try:
-            info = call_sbtool(sbtool.parse_ss_link, link)
-            tag = info["tag"]
-            if not tag:
-                i = 1
-                while "ss%d" % i in nodes:
-                    i += 1
-                tag = "ss%d" % i
-            node = {"server": info["server"], "server_port": info["port"],
-                    "method": info["method"], "password": info["password"]}
-            if ctx.body.get("uot"):
-                node["udp_over_tcp"] = True
-            if info["plugin"]:
-                node["plugin"] = info["plugin"]
-                node["plugin_opts"] = info["plugin_opts"]
-            if tag in nodes:
-                results.append({"tag": tag, "ok": False, "error": "tag 已存在"})
-                continue
-            call_sbtool(sbtool.add_node, nodes, tag, node)
-            results.append({"tag": tag, "ok": True,
-                            "server": "%s:%d" % (node["server"], node["server_port"])})
-        except ApiError as e:
-            results.append({"tag": "", "ok": False, "error": str(e)})
-        except Exception as e:
-            results.append({"tag": "", "ok": False, "error": str(e)})
-    sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
+    with PROC_LOCK:
+        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        for link in links:
+            try:
+                info = call_sbtool(sbtool.parse_ss_link, link)
+                tag = info["tag"]
+                if not tag:
+                    i = 1
+                    while "ss%d" % i in nodes:
+                        i += 1
+                    tag = "ss%d" % i
+                node = {"server": info["server"], "server_port": info["port"],
+                        "method": info["method"], "password": info["password"]}
+                if ctx.body.get("uot"):
+                    node["udp_over_tcp"] = True
+                if info["plugin"]:
+                    node["plugin"] = info["plugin"]
+                    node["plugin_opts"] = info["plugin_opts"]
+                if tag in nodes:
+                    results.append({"tag": tag, "ok": False, "error": "tag 已存在"})
+                    continue
+                call_sbtool(sbtool.add_node, nodes, tag, node)
+                results.append({"tag": tag, "ok": True,
+                                "server": "%s:%d" % (node["server"], node["server_port"])})
+            except ApiError as e:
+                results.append({"tag": "", "ok": False, "error": str(e)})
+            except Exception as e:
+                results.append({"tag": "", "ok": False, "error": str(e)})
+        sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"results": results}
 
 
@@ -765,11 +807,12 @@ def h_users_servers(ctx):
 def h_users_reset_usage(ctx):
     """一键重置用户流量 (当前周期清零, 自动解除超额状态)"""
     name = ctx.match.group(1)
-    users = sbtool.load_users(BASE)
-    if name not in users:
-        raise ApiError("用户不存在", 404)
-    sbtool.reset_user_usage(BASE, name)
-    sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)
+    with PROC_LOCK:
+        users = sbtool.load_users(BASE)
+        if name not in users:
+            raise ApiError("用户不存在", 404)
+        sbtool.reset_user_usage(BASE, name)
+        sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)
     return 200, {"ok": True}
 
 
@@ -820,7 +863,6 @@ def h_routes_list(ctx):
 
 def h_routes_add(ctx):
     b = ctx.body
-    rc = routes_data()
     entry = {}
     if b.get("rule_set"):
         sets = [t for t in b["rule_set"] if t]
@@ -864,18 +906,21 @@ def h_routes_add(ctx):
         entry["outbound"] = outbound
     if b.get("dns") in ("remote", "remote-us"):
         entry["dns"] = b["dns"]
-    rc["rules"].append(entry)
-    sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    with PROC_LOCK:
+        rc = routes_data()
+        rc["rules"].append(entry)
+        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True, "index": len(rc["rules"]) - 1}
 
 
 def h_routes_del(ctx):
     idx = int(ctx.match.group(1))
-    rc = routes_data()
-    if not (0 <= idx < len(rc["rules"])):
-        raise ApiError("序号越界", 404)
-    del rc["rules"][idx]
-    sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    with PROC_LOCK:
+        rc = routes_data()
+        if not (0 <= idx < len(rc["rules"])):
+            raise ApiError("序号越界", 404)
+        del rc["rules"][idx]
+        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True}
 
 
@@ -883,18 +928,18 @@ def h_routes_move(ctx):
     b = ctx.body
     idx = int(b.get("index", -1))
     d = int(b.get("dir", 0))
-    rc = routes_data()
-    j = idx + d
-    if not (0 <= idx < len(rc["rules"])) or not (0 <= j < len(rc["rules"])):
-        raise ApiError("无法移动")
-    rc["rules"][idx], rc["rules"][j] = rc["rules"][j], rc["rules"][idx]
-    sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    with PROC_LOCK:
+        rc = routes_data()
+        j = idx + d
+        if not (0 <= idx < len(rc["rules"])) or not (0 <= j < len(rc["rules"])):
+            raise ApiError("无法移动")
+        rc["rules"][idx], rc["rules"][j] = rc["rules"][j], rc["rules"][idx]
+        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True}
 
 
 def h_routes_final(ctx):
     b = ctx.body
-    rc = routes_data()
     outbound = (b.get("outbound") or "").strip()
     user = (b.get("user") or "").strip()
     nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
@@ -904,21 +949,25 @@ def h_routes_final(ctx):
         all_users = sbtool.load_users(BASE)
         if user not in all_users:
             raise ApiError("用户不存在: %s" % user)
-        rc["user_final"][user] = outbound
-    else:
-        rc["final"] = outbound
-    sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    with PROC_LOCK:
+        rc = routes_data()
+        if user:
+            rc["user_final"][user] = outbound
+        else:
+            rc["final"] = outbound
+        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True}
 
 
 def h_routes_final_del(ctx):
     user = (ctx.body.get("user") or "").strip()
-    rc = routes_data()
-    if user:
-        rc.get("user_final", {}).pop(user, None)
-    else:
-        rc["final"] = None
-    sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    with PROC_LOCK:
+        rc = routes_data()
+        if user:
+            rc.get("user_final", {}).pop(user, None)
+        else:
+            rc["final"] = None
+        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True}
 
 
@@ -1093,8 +1142,8 @@ def h_servers_add(ctx):
         sid = secrets.token_hex(4)
         while sid in servers:  # 防 sid 碰撞
             sid = secrets.token_hex(4)
-        token = sbtool.gen_server_token()
-        srv = {"token_hash": sbtool.hash_server_token(token),
+        token = sbtool.gen_server_token()  # 一次性安装令牌 (激活时烧毁, 永久令牌届时生成)
+        srv = {"install_hash": sbtool.hash_server_token(token),
                "created_at": int(time.time()), "enabled": True}
         srv.update(fields)
         servers[sid] = srv
@@ -1128,29 +1177,30 @@ def h_servers_del(ctx):
             raise ApiError("节点不存在", 404)
         del servers[sid]
         sbtool.save_servers(BASE, servers)
-    # 清理分流规则中对该节点的引用
-    rc = routes_data()
-    changed = False
-    for r in rc.get("rules", []):
-        if r.get("nodes") and sid in r["nodes"]:
-            r["nodes"] = [n for n in r["nodes"] if n != sid]
-            if not r["nodes"]:
-                r.pop("nodes")
-            changed = True
-    if changed:
-        sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+        # 清理分流规则中对该节点的引用
+        rc = routes_data()
+        changed = False
+        for r in rc.get("rules", []):
+            if r.get("nodes") and sid in r["nodes"]:
+                r["nodes"] = [n for n in r["nodes"] if n != sid]
+                if not r["nodes"]:
+                    r.pop("nodes")
+                changed = True
+        if changed:
+            sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     return 200, {"ok": True}
 
 
 def h_servers_token(ctx):
-    """重置节点 token (旧 token 立即失效), 重新生成部署命令"""
+    """重新生成部署命令: 新一次性安装令牌, 旧安装令牌与旧节点令牌立即失效"""
     sid = ctx.match.group(1)
     token = sbtool.gen_server_token()
     with PROC_LOCK:
         servers = sbtool.load_servers(BASE)
         if sid not in servers:
             raise ApiError("节点不存在", 404)
-        servers[sid]["token_hash"] = sbtool.hash_server_token(token)
+        servers[sid]["install_hash"] = sbtool.hash_server_token(token)
+        servers[sid].pop("token_hash", None)  # 旧节点令牌立即失效, 重装激活时轮换新令牌
         sbtool.save_servers(BASE, servers)
     return 200, {"ok": True, "token": token,
                  "install_command": install_command(sid, token, request_host_port(ctx.headers),
@@ -1387,6 +1437,23 @@ def h_agent_install(ctx):
         return 200, Raw(f.read(), "text/x-shellscript")
 
 
+def h_agent_activate(ctx):
+    """一次性安装令牌兑换永久节点令牌: 原子烧毁安装令牌并轮换永久令牌。
+    永久令牌仅此一次以明文返回 (面板只存哈希), 安装命令泄露/重放均无法二次使用。"""
+    with PROC_LOCK:
+        servers = sbtool.load_servers(BASE)
+        srv = servers.get(ctx.sid)
+        ih = sbtool.hash_server_token(ctx.token)
+        if not srv or not srv.get("install_hash") or \
+                not hmac.compare_digest(ih, srv["install_hash"]):
+            raise ApiError("安装令牌无效或已使用", 401)
+        token = sbtool.gen_server_token()
+        srv["token_hash"] = sbtool.hash_server_token(token)
+        srv.pop("install_hash", None)  # 烧毁: 一次性
+        sbtool.save_servers(BASE, servers)
+    return 200, {"ok": True, "token": token}
+
+
 def h_agent_ca(ctx):
     ensure_agent_cert()
     _, cert, _ = agent_cert_paths()
@@ -1399,24 +1466,12 @@ def h_agent_report(ctx):
     stats = b.get("stats")
     if not isinstance(stats, dict) or len(stats) > 10000:
         raise ApiError("stats 非法", 400)
-    allowed = set(sbtool.server_users(BASE, ctx.srv))  # 只接受本节点真实分配的用户
-    clean = {}
-    for name, pair in stats.items():
-        name = str(name)
-        if name not in allowed:
-            continue
-        if isinstance(pair, list) and len(pair) == 2:
-            clean[name] = pair
-    sbtool.add_traffic(BASE, ctx.sid, clean)
-    note_report_rates(ctx.sid, clean)
-    try:
-        sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)  # 维护 超额/到期/月重置
-    except Exception:
-        pass  # 状态维护失败不影响上报主流程
+    # 心跳先行: 记账/状态维护等任何后续故障都不能把节点打成离线
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
               "last_error": str(b.get("last_error") or "")[:300],
+              "sb_running": bool(b.get("sb_running")),
               "reported_ip": ctx.client_ip}
     cert = b.get("cert")
     if isinstance(cert, dict):  # agent 上报的证书状态
@@ -1426,6 +1481,22 @@ def h_agent_report(ctx):
             pass
         fields["cert_issuer"] = str(cert.get("issuer") or "")[:128]
     touch_server(ctx.sid, **fields)
+    # 流量记账 best-effort: 只接受本节点真实分配的用户
+    try:
+        allowed = set(sbtool.server_users(BASE, ctx.srv))
+        clean = {}
+        for name, pair in stats.items():
+            name = str(name)
+            if name not in allowed:
+                continue
+            if isinstance(pair, list) and len(pair) == 2:
+                clean[name] = pair
+        sbtool.add_traffic(BASE, ctx.sid, clean)
+        note_report_rates(ctx.sid, clean)
+        sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)  # 维护 超额/到期/月重置
+    except Exception:
+        import traceback
+        traceback.print_exc()  # report 流量记账失败不影响心跳
     return 200, {"ok": True}
 
 
@@ -1488,12 +1559,13 @@ def _me_password_locked(name, b):
 def h_me_refresh_token(ctx):
     """一键重置订阅链接: 换 token, 旧订阅地址立即失效"""
     name = ctx.user["name"]
-    users = sbtool.load_users(BASE)
-    u = users.get(name)
-    if not u:
-        raise ApiError("用户不存在", 404)
-    u["token"] = sbtool.gen_token()
-    sbtool.save_users(BASE, users)
+    with PROC_LOCK:
+        users = sbtool.load_users(BASE)
+        u = users.get(name)
+        if not u:
+            raise ApiError("用户不存在", 404)
+        u["token"] = sbtool.gen_token()
+        sbtool.save_users(BASE, users)
     s = sbtool.get_settings(BASE)
     host = request_host_port(ctx.headers)
     scheme = "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http"
@@ -1818,7 +1890,8 @@ def handle_sub(handler, token):
     users = sbtool.load_users(BASE)
     found = None
     for name, u in users.items():
-        if u.get("token") == token:
+        tok = u.get("token") or ""
+        if hmac.compare_digest(tok.encode("utf-8"), token.encode("utf-8")):
             found = (name, u)
             break
     if not found:
@@ -1894,6 +1967,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if ctype.startswith("application/json"):
             self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")  # 告知客户端勿复用即将关闭的连接
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1910,20 +1985,24 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, text, "text/plain; charset=utf-8", headers)
 
     # ---- request helpers
-    def read_body(self):
+    def read_body(self, max_bytes=4 * 1024 * 1024):
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = 0
         if n <= 0:
             return {}
-        if n > 4 * 1024 * 1024:
+        if n > max_bytes:
+            self.close_connection = True  # 残留 body 不读, 断开防破坏 keep-alive 解析
             raise ApiError("请求体过大", 413)
         raw = self.rfile.read(n)
         try:
-            return json.loads(raw.decode("utf-8"))
+            obj = json.loads(raw.decode("utf-8"))
         except Exception:
             raise ApiError("请求体必须是 JSON")
+        if not isinstance(obj, dict):
+            raise ApiError("请求体必须是 JSON 对象")
+        return obj
 
     def handle_agent(self, path, query):
         """agent 通道: /agent/* 接口, 节点 token 认证。返回 True 表示已处理。"""
@@ -1932,13 +2011,38 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = fn(Ctx(self, {}, query, None, None))
                 self._send(code, obj.data, obj.ctype)
                 return True
+        for method, pattern, fn in AGENT_ROUTES_INSTALL:
+            if method != self.command:
+                continue
+            m = re.fullmatch(pattern, path)
+            if not m:
+                continue
+            try:
+                sid, srv, token = auth_agent_install(self.headers)  # 先认证再读 body
+            except ApiError:
+                self._drop_unread_body()
+                raise
+            body = {}
+            if self.command in ("POST", "PUT", "DELETE"):
+                body = self.read_body(16 * 1024)
+            ctx = Ctx(self, body, query, None, m)
+            ctx.sid = sid
+            ctx.srv = srv
+            ctx.token = token
+            code, obj = fn(ctx)
+            self.send_json(code, obj)
+            return True
         for method, pattern, fn in AGENT_ROUTES:
             if method != self.command:
                 continue
             m = re.fullmatch(pattern, path)
             if not m:
                 continue
-            sid, srv, token = auth_agent(self.headers)  # 先认证再读 body, 防未认证资源消耗
+            try:
+                sid, srv, token = auth_agent(self.headers)  # 先认证再读 body, 防未认证资源消耗
+            except ApiError:
+                self._drop_unread_body()
+                raise
             body = {}
             if self.command in ("POST", "PUT", "DELETE"):
                 body = self.read_body()
@@ -1960,6 +2064,11 @@ class Handler(BaseHTTPRequestHandler):
             return parse_token(auth[7:].strip())
         return None
 
+    def _drop_unread_body(self):
+        """请求体尚未读取时关闭连接: 残留字节会被 keep-alive 误当成下一个请求"""
+        if self.command in ("POST", "PUT", "DELETE"):
+            self.close_connection = True
+
     def dispatch(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -1980,9 +2089,6 @@ class Handler(BaseHTTPRequestHandler):
 
         # API
         if path.startswith("/api/"):
-            body = {}
-            if self.command in ("POST", "PUT", "DELETE"):
-                body = self.read_body()
             for method, pattern, fn, role in ROUTES:
                 if method != self.command:
                     continue
@@ -1991,21 +2097,31 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 user = None
                 if role is not None:
-                    user = self.auth_user()
-                    if not user:
-                        raise ApiError("未登录或会话已过期", 401)
-                    if role != "any":
-                        check_session(user, role)
+                    try:
+                        user = self.auth_user()
+                        if not user:
+                            raise ApiError("未登录或会话已过期", 401)
+                        if role != "any":
+                            check_session(user, role)
+                    except ApiError:
+                        self._drop_unread_body()  # body 未读, 断开防残留字节破坏 keep-alive
+                        raise
+                # 认证通过后再读 body (公开接口给小额度), 防未认证资源消耗
+                body = {}
+                if self.command in ("POST", "PUT", "DELETE"):
+                    body = self.read_body(64 * 1024 if role is None else 4 * 1024 * 1024)
                 ctx = Ctx(self, body, query, user, m)
                 code, obj = fn(ctx)
                 self.send_json(code, obj)
                 return
+            self._drop_unread_body()
             raise ApiError("接口不存在", 404)
 
         # 静态文件 + SPA
         if self.command == "GET":
             self.serve_static(path)
             return
+        self._drop_unread_body()
         raise ApiError("Not Found", 404)
 
     def serve_static(self, path):
@@ -2051,8 +2167,46 @@ class Handler(BaseHTTPRequestHandler):
     do_DELETE = _handle
 
 
-class V6Server(ThreadingHTTPServer):
+class LimitedHTTPServer(ThreadingHTTPServer):
+    """带并发连接上限: 超限时立即回 503 并关闭, 防未认证连接泛洪耗尽线程/内存"""
     daemon_threads = True
+    max_conns = 256
+    request_queue_size = 128  # 监听 backlog (默认 5, 瞬时并发连接会被内核直接拒绝)
+
+    def __init__(self, *args, **kwargs):
+        self._conns = 0
+        self._conn_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        with self._conn_lock:
+            over = self._conns >= self.max_conns
+            if not over:
+                self._conns += 1
+        if over:
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                                b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            with self._conn_lock:
+                self._conns -= 1
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._conn_lock:
+                self._conns -= 1
+
+
+class V6Server(LimitedHTTPServer):
     address_family = __import__("socket").AF_INET6
 
     def server_bind(self):
@@ -2069,6 +2223,10 @@ class V6Server(ThreadingHTTPServer):
 AGENT_ROUTES_PUBLIC = [  # 无需认证 (内容公开且静态)
     ("GET", r"/agent/install\.sh", h_agent_install),
     ("GET", r"/agent/ca\.pem", h_agent_ca),
+]
+
+AGENT_ROUTES_INSTALL = [  # Bearer 一次性安装令牌认证 (仅激活兑换)
+    ("POST", r"/agent/activate", h_agent_activate),
 ]
 
 AGENT_ROUTES = [  # Bearer 节点 token 认证
@@ -2110,8 +2268,7 @@ def main():
     if ":" in listen:
         srv = V6Server((listen, port), Handler)
     else:
-        srv = ThreadingHTTPServer((listen, port), Handler)
-        srv.daemon_threads = True
+        srv = LimitedHTTPServer((listen, port), Handler)
     print("%s v%s 面板已启动: http://[%s]:%d (数据目录 %s)" % (PANEL_NAME, PANEL_VERSION, listen, port, BASE))
     if not s.get("admin_pass_hash"):
         print("首次运行: 请打开面板页面设置管理员密码")

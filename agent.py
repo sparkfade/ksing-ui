@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 # 服务器常见 C/POSIX locale 会把 stdout 切成 latin-1, 中文日志会崩; 强制 UTF-8
@@ -34,7 +35,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.2.2"
+VERSION = "1.2.4"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -86,7 +87,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=SSL_CTX))
+# ProxyHandler({}): 显式置空代理, 免疫节点环境里残留的 http_proxy/https_proxy 变量
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                      _NoRedirect(),
+                                      urllib.request.HTTPSHandler(context=SSL_CTX))
 
 
 def api(method, path, body=None, timeout=30):
@@ -96,8 +100,15 @@ def api(method, path, body=None, timeout=30):
         "User-Agent": "ksing-agent/" + VERSION,
         "Content-Type": "application/json",
     })
-    with _OPENER.open(req, timeout=timeout) as r:
-        out = r.read()
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            out = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            log("!! 节点 token 已失效(401): 请在面板对本节点执行「重新部署」获取新安装命令")
+        elif e.code == 403:
+            log("!! 节点已被面板禁用(403), 请在面板检查节点状态")
+        raise
     HEALTH["ok_at"] = time.time()  # 面板通信成功, 喂看门狗
     return out
 
@@ -342,7 +353,54 @@ def have_systemd_unit():
             and bool(svc_name()))
 
 
-def restart_singbox():
+_RESTARTS = []  # 崩溃循环检测: 记录最近的拉起时间
+
+
+def recent_core_log():
+    """取 sing-box 最近几行日志, 用于把崩溃原因透出到面板"""
+    if have_systemd_unit():
+        try:
+            r = subprocess.run(["journalctl", "-u", svc_name(), "-n", "8", "--no-pager"],
+                               capture_output=True, text=True, timeout=10)
+            lines = [l.strip() for l in (r.stdout or "").splitlines() if l.strip()]
+            if lines:
+                return " | ".join(lines[-3:])[:250]
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        with open(os.path.join(DIR, "sing-box.log"), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096))
+            data = f.read().decode("utf-8", "replace")
+        lines = [l.strip() for l in data.splitlines() if l.strip()]
+        return " | ".join(lines[-3:])[:250]
+    except OSError:
+        return ""
+
+
+def wait_stats_ready(timeout=12):
+    """等 sing-box 的统计端口就绪 (重启后立刻查询必然 connection refused)"""
+    host, port = STATS.rsplit(":", 1)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, int(port)), timeout=2):
+                return True
+        except OSError:
+            time.sleep(0.6)
+    return False
+
+
+def restart_singbox(relaunch=False):
+    if relaunch:
+        # 只有「存活检查发现没运行」的拉起才算崩溃迹象; 配置更新的正常重启不算
+        _RESTARTS.append(time.time())
+        del _RESTARTS[:-10]
+        recent = [t for t in _RESTARTS if time.time() - t < 120]
+        if len(recent) >= 3:
+            tail = recent_core_log()
+            LAST_ERROR[0] = ("sing-box 反复重启, 疑似配置或端口问题" +
+                             (": " + tail if tail else ""))[:300]
     svc = svc_name()
     if have_systemd_unit():
         r = subprocess.run(["systemctl", "restart", svc], capture_output=True, text=True,
@@ -385,9 +443,9 @@ def ensure_cert_files(cfg):
     if mode == "selfip" and ip:
         cmd += ["-addext", "subjectAltName=IP:%s" % ip]
     cmd += ["-keyout", key, "-out", cert]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        raise RuntimeError("生成自签证书失败: %s" % r.stderr.strip()[:200])
+        raise RuntimeError("生成自签证书失败: %s" % (r.stderr or "").strip()[:200])
     os.chmod(key, 0o600)
     log("已补生成节点证书 (mode=%s, CN=%s)" % (mode, subj))
 
@@ -446,7 +504,11 @@ def pull_config(state, wait=0):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(resp["config"], f, ensure_ascii=False, indent=2)
     os.chmod(tmp, 0o600)  # 配置含全部密码
-    r = subprocess.run([BIN, "check", "-c", tmp], capture_output=True, text=True)
+    try:
+        # check 卡死会永久挂死拉取线程 (看门狗只覆盖主循环), 必须有超时
+        r = subprocess.run([BIN, "check", "-c", tmp], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        r = subprocess.CompletedProcess([], 1, "", "sing-box check 超时 (60s), 疑似二进制或存储异常")
     if r.returncode != 0:
         os.remove(tmp)
         log("配置校验失败, 保留旧配置: %s" % (r.stdout + r.stderr).strip()[-500:])
@@ -455,24 +517,34 @@ def pull_config(state, wait=0):
     restart_singbox()
     state["hash"] = resp["hash"]
     save_state(state)
+    wait_stats_ready()  # 等统计端口就绪, 避免紧随其后的上报查不到流量
     log("配置已更新并重启 sing-box, hash=%s" % resp["hash"][:12])
     return True
 
 
 def singbox_running():
+    if have_systemd_unit():
+        try:
+            r = subprocess.run(["systemctl", "is-active", svc_name()],
+                               capture_output=True, text=True, timeout=15)
+            if r.stdout.strip() == "active":
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+    # pidfile 兜底: 无 systemd, 或 restart 时 systemctl 失败后直管的进程
     pidfile = os.path.join(DIR, "sing-box.pid")
     try:
         with open(pidfile) as f:
-            os.kill(int(f.read().strip()), 0)
+            pid = int(f.read().strip())
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            cmd = f.read()
+        # 只能读一次: 二次 f.read() 必为空, 会让 k-sing 回退检测永远失败 (误判未运行→反复重启)
+        if b"sing-box" not in cmd and b"k-sing" not in cmd:
+            return False
+        os.kill(pid, 0)
         return True
     except (OSError, ValueError):
-        pass
-    svc = svc_name()
-    if svc:
-        r = subprocess.run(["systemctl", "is-active", svc], capture_output=True, text=True,
-                           timeout=15)
-        return r.stdout.strip() == "active"
-    return False
+        return False
 
 
 def cert_info():
@@ -508,15 +580,25 @@ def cert_info():
 
 def report(state):
     stats = {}
-    try:
-        stats = query_traffic()
-    except Exception as e:  # noqa: BLE001
-        log("流量查询失败(sing-box 可能未运行): %s" % e)
+    for attempt in (0, 1):
+        try:
+            stats = query_traffic()
+            break
+        except OSError as e:
+            # sing-box 刚重启时统计端口尚未就绪, 等 3 秒重试一次
+            if attempt == 0:
+                time.sleep(3)
+            else:
+                log("流量查询失败(sing-box 可能未运行): %s" % e)
+        except Exception as e:  # noqa: BLE001
+            log("流量查询失败(sing-box 可能未运行): %s" % e)
+            break
     body = {
         "stats": stats,
         "applied_hash": state.get("hash", ""),
         "agent_version": VERSION,
         "last_error": LAST_ERROR[0],
+        "sb_running": singbox_running(),
     }
     ci = cert_info()
     if ci:
@@ -541,15 +623,33 @@ def pull_loop(state):
             time.sleep(PULL_INTERVAL)  # 出错退避
 
 
+def acquire_instance_lock():
+    """单实例锁: 防止重复部署/手动调试导致多个 agent 互踩 (重复重启 sing-box、上报互相覆盖)"""
+    import fcntl
+    fp = open(os.path.join(DIR, "agent.lock"), "w")
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("已有另一个 ksing-agent 实例在运行, 本实例退出", flush=True)
+        sys.exit(1)
+    return fp  # 保持引用防 GC 关闭; flock 随 os.execv 自更新保留
+
+
+_LOCK_F = None
+
+
 def main():
+    global _LOCK_F
     once = "--once" in sys.argv
     log("ksing-agent v%s 启动, 面板 %s" % (VERSION, PANEL))
+    _LOCK_F = acquire_instance_lock()
     state = load_state()
     if once:
         pull_config(state)
         if not singbox_running():
             log("sing-box 未运行, 启动")
-            restart_singbox()
+            restart_singbox(relaunch=True)
+            wait_stats_ready()
         report(state)
         return
     threading.Thread(target=pull_loop, args=(state,), daemon=True).start()
@@ -565,7 +665,8 @@ def main():
             if now >= next_check:
                 if not singbox_running():
                     log("sing-box 未运行, 拉起")
-                    restart_singbox()
+                    restart_singbox(relaunch=True)
+                    wait_stats_ready(8)
                 next_check = now + 30
         except Exception as e:  # noqa: BLE001
             log("存活检查失败: %s" % e)
@@ -582,4 +683,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001
+        # 致命异常必须把 traceback 留进 journal, 否则节点"静默离线"无从排查
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
