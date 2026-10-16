@@ -439,6 +439,54 @@ def parse_ss_link(link):
     return {"tag": tag, "server": server, "port": port, "method": method,
             "password": password, "plugin": plugin, "plugin_opts": plugin_opts}
 
+def parse_anytls_link(link):
+    """解析 anytls:// 分享链接:
+      anytls://password@host:port?sni=xxx&insecure=1#name
+    与面板自身导出的链接格式互逆"""
+    raw = link.strip()
+    if not raw.lower().startswith("anytls://"):
+        die("不是 anytls:// 链接: %s" % raw[:50])
+    body = raw[len("anytls://"):]
+    tag = ""
+    if "#" in body:
+        body, frag = body.split("#", 1)
+        tag = urllib.parse.unquote(frag).strip()
+    query = ""
+    if "?" in body:
+        body, query = body.split("?", 1)
+    if "@" not in body:
+        die("无法解析 anytls 链接 (缺少 password@host): %s" % raw[:50])
+    password, hostport = body.rstrip("/").rsplit("@", 1)
+    password = urllib.parse.unquote(password).strip()
+    if not password:
+        die("anytls 链接缺少密码: %s" % raw[:50])
+    hostport = hostport.strip().rstrip("/")
+    if hostport.startswith("["):
+        m = re.match(r"^\[([^\]]+)\]:(\d+)$", hostport)
+        if not m:
+            die("无法解析地址: %s" % hostport)
+        server, port = m.group(1), int(m.group(2))
+    else:
+        server, sep, ps = hostport.rpartition(":")
+        if not sep or not server or not ps.isdigit():
+            die("无法解析地址: %s" % hostport)
+        port = int(ps)
+    qs = urllib.parse.parse_qs(query)
+    sni = (qs.get("sni") or qs.get("peer") or [""])[0].strip()
+    insecure = any(qs.get(k, []) and qs[k][0] in ("1", "true")
+                   for k in ("insecure", "allow_insecure", "allowInsecure"))
+    return {"tag": tag, "server": server, "port": port, "password": password,
+            "sni": sni, "insecure": insecure}
+
+def validate_anytls_node(node):
+    if not node.get("server"):
+        die("需要 server")
+    if not node.get("password"):
+        die("anytls 出站需要密码")
+    port = int(node.get("server_port") or 0)
+    if not (1 <= port <= 65535):
+        die("端口非法: %s" % port)
+
 def validate_node(method, password, port):
     if method not in SS_METHODS:
         die("不支持的 method %s\n可选: %s" % (method, ", ".join(SS_METHODS)))
@@ -459,7 +507,10 @@ def add_node(nodes, tag, node, force=False):
         die("tag %s 为内置保留名" % tag)
     if tag in nodes and not force:
         die("节点 %s 已存在 (用 --force 覆盖)" % tag)
-    validate_node(node["method"], node["password"], node["server_port"])
+    if node.get("type") == "anytls":
+        validate_anytls_node(node)
+    else:
+        validate_node(node["method"], node["password"], node["server_port"])
     nodes[tag] = node
 
 def cmd_node(args):
@@ -480,6 +531,25 @@ def cmd_node(args):
         if args.tag and len(args.links) > 1:
             die("--tag 只能用于单个链接")
         for link in args.links:
+            if link.strip().lower().startswith("anytls://"):
+                info = parse_anytls_link(link)
+                tag = args.tag or info["tag"]
+                if not tag:
+                    i = 1
+                    while "anytls%d" % i in nodes:
+                        i += 1
+                    tag = "anytls%d" % i
+                    print("链接无 #name, 自动分配 tag: %s" % tag)
+                node = {"type": "anytls",
+                        "server": info["server"], "server_port": info["port"],
+                        "password": info["password"],
+                        "sni": info["sni"], "insecure": info["insecure"]}
+                add_node(nodes, tag, node, args.force)
+                print("已导入 %s -> anytls://%s:%d%s" % (
+                    tag, node["server"], node["server_port"],
+                    " (sni=%s%s)" % (node["sni"], ", insecure" if node["insecure"] else "")
+                    if node["sni"] or node["insecure"] else ""))
+                continue
             info = parse_ss_link(link)
             tag = args.tag or info["tag"]
             if not tag:
@@ -518,7 +588,12 @@ def cmd_node(args):
                 extra += " uot"
             if n.get("plugin"):
                 extra += " plugin=%s(%s)" % (n["plugin"], n.get("plugin_opts", ""))
-            print("%-20s %s:%s %s%s" % (tag, n["server"], n["server_port"], n["method"], extra))
+            if n.get("type") == "anytls":
+                extra += " sni=%s%s" % (n.get("sni") or n["server"],
+                                        " insecure" if n.get("insecure") else "")
+                print("%-20s %s:%s anytls%s" % (tag, n["server"], n["server_port"], extra))
+            else:
+                print("%-20s %s:%s %s%s" % (tag, n["server"], n["server_port"], n["method"], extra))
 
 # ---------------------------------------------------------------- user
 
@@ -880,6 +955,14 @@ def build_server_config(base, sid):
 
     outbounds = []
     for tag, n in nodes.items():
+        if n.get("type") == "anytls":
+            tls = {"enabled": True, "insecure": bool(n.get("insecure"))}
+            if n.get("sni"):
+                tls["server_name"] = n["sni"]
+            outbounds.append({"type": "anytls", "tag": tag,
+                              "server": n["server"], "server_port": n["server_port"],
+                              "password": n["password"], "tls": tls})
+            continue
         ob = {"type": "shadowsocks", "tag": tag,
               "server": n["server"], "server_port": n["server_port"],
               "method": n["method"], "password": n["password"]}

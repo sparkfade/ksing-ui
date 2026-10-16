@@ -616,19 +616,27 @@ def h_nodes_add(ctx):
     tag = (b.get("tag") or "").strip()
     if not tag:
         raise ApiError("需要 tag")
-    node = {
-        "server": (b.get("server") or "").strip(),
-        "server_port": int(b.get("server_port") or 0),
-        "method": (b.get("method") or "").strip(),
-        "password": b.get("password") or "",
-    }
-    if not node["server"]:
-        raise ApiError("需要 server")
-    if b.get("udp_over_tcp"):
-        node["udp_over_tcp"] = True
-    if b.get("plugin"):
-        node["plugin"] = b["plugin"]
-        node["plugin_opts"] = b.get("plugin_opts", "")
+    if b.get("type") == "anytls":
+        node = {"type": "anytls",
+                "server": (b.get("server") or "").strip(),
+                "server_port": int(b.get("server_port") or 0),
+                "password": (b.get("password") or "").strip(),
+                "sni": (b.get("sni") or "").strip(),
+                "insecure": bool(b.get("insecure"))}
+    else:
+        node = {
+            "server": (b.get("server") or "").strip(),
+            "server_port": int(b.get("server_port") or 0),
+            "method": (b.get("method") or "").strip(),
+            "password": b.get("password") or "",
+        }
+        if not node["server"]:
+            raise ApiError("需要 server")
+        if b.get("udp_over_tcp"):
+            node["udp_over_tcp"] = True
+        if b.get("plugin"):
+            node["plugin"] = b["plugin"]
+            node["plugin_opts"] = b.get("plugin_opts", "")
     with PROC_LOCK:
         nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
         call_sbtool(sbtool.add_node, nodes, tag, node, force=bool(b.get("force")))
@@ -644,17 +652,27 @@ def h_nodes_update(ctx):
             raise ApiError("节点不存在", 404)
         b = ctx.body
         node = nodes[tag]
-        for k in ("server", "method", "password", "plugin", "plugin_opts"):
-            if k in b:
-                node[k] = b[k]
-        if "server_port" in b:
-            node["server_port"] = int(b["server_port"])
-        if "udp_over_tcp" in b:
-            if b["udp_over_tcp"]:
-                node["udp_over_tcp"] = True
-            else:
-                node.pop("udp_over_tcp", None)
-        call_sbtool(sbtool.validate_node, node["method"], node["password"], node["server_port"])
+        if node.get("type") == "anytls":
+            for k in ("server", "password", "sni"):
+                if k in b:
+                    node[k] = (b[k] or "").strip()
+            if "server_port" in b:
+                node["server_port"] = int(b["server_port"])
+            if "insecure" in b:
+                node["insecure"] = bool(b["insecure"])
+            call_sbtool(sbtool.validate_anytls_node, node)
+        else:
+            for k in ("server", "method", "password", "plugin", "plugin_opts"):
+                if k in b:
+                    node[k] = b[k]
+            if "server_port" in b:
+                node["server_port"] = int(b["server_port"])
+            if "udp_over_tcp" in b:
+                if b["udp_over_tcp"]:
+                    node["udp_over_tcp"] = True
+                else:
+                    node.pop("udp_over_tcp", None)
+            call_sbtool(sbtool.validate_node, node["method"], node["password"], node["server_port"])
         new_tag = (b.get("new_tag") or "").strip()
         if new_tag and new_tag != tag:
             if new_tag in nodes or new_tag in ("direct", "block", "dns-out"):
@@ -699,28 +717,42 @@ def h_nodes_del(ctx):
 
 def h_nodes_import(ctx):
     text = ctx.body.get("text") or ""
-    links = [l.strip() for l in text.splitlines() if l.strip().lower().startswith("ss://")]
+    links = [l.strip() for l in text.splitlines()
+             if l.strip().lower().startswith(("ss://", "anytls://"))]
     if not links:
-        raise ApiError("未找到 ss:// 链接")
+        raise ApiError("未找到 ss:// 或 anytls:// 链接")
     results = []
     with PROC_LOCK:
         nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
         for link in links:
             try:
-                info = call_sbtool(sbtool.parse_ss_link, link)
-                tag = info["tag"]
-                if not tag:
-                    i = 1
-                    while "ss%d" % i in nodes:
-                        i += 1
-                    tag = "ss%d" % i
-                node = {"server": info["server"], "server_port": info["port"],
-                        "method": info["method"], "password": info["password"]}
-                if ctx.body.get("uot"):
-                    node["udp_over_tcp"] = True
-                if info["plugin"]:
-                    node["plugin"] = info["plugin"]
-                    node["plugin_opts"] = info["plugin_opts"]
+                if link.lower().startswith("anytls://"):
+                    info = call_sbtool(sbtool.parse_anytls_link, link)
+                    tag = info["tag"]
+                    if not tag:
+                        i = 1
+                        while "anytls%d" % i in nodes:
+                            i += 1
+                        tag = "anytls%d" % i
+                    node = {"type": "anytls",
+                            "server": info["server"], "server_port": info["port"],
+                            "password": info["password"],
+                            "sni": info["sni"], "insecure": info["insecure"]}
+                else:
+                    info = call_sbtool(sbtool.parse_ss_link, link)
+                    tag = info["tag"]
+                    if not tag:
+                        i = 1
+                        while "ss%d" % i in nodes:
+                            i += 1
+                        tag = "ss%d" % i
+                    node = {"server": info["server"], "server_port": info["port"],
+                            "method": info["method"], "password": info["password"]}
+                    if ctx.body.get("uot"):
+                        node["udp_over_tcp"] = True
+                    if info["plugin"]:
+                        node["plugin"] = info["plugin"]
+                        node["plugin_opts"] = info["plugin_opts"]
                 if tag in nodes:
                     results.append({"tag": tag, "ok": False, "error": "tag 已存在"})
                     continue
@@ -2136,7 +2168,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self):
         parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+        path = urllib.parse.unquote(parsed.path)  # 解码中文 tag/用户名 (前端 encodeURIComponent)
         query = urllib.parse.parse_qs(parsed.query)
         query = {k: v[0] for k, v in query.items()}
 

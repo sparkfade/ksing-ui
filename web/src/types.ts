@@ -1,11 +1,14 @@
 export interface NodeInfo {
+  type?: 'anytls'
   server: string
   server_port: number
-  method: string
+  method?: string
   password: string
   udp_over_tcp?: boolean
   plugin?: string
   plugin_opts?: string
+  sni?: string
+  insecure?: boolean
 }
 
 export interface TrafficStat {

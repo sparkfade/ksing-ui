@@ -6,7 +6,7 @@
       <Button @click="importVisible = true">批量导入</Button>
       <Button variant="primary" @click="openAdd">添加节点</Button>
     </div>
-    <p class="page-sub">Shadowsocks 出站，供分流规则与默认出口选择；改动实时下发到各服务器节点。</p>
+    <p class="page-sub">出站节点（Shadowsocks / AnyTLS），供分流规则与默认出口选择；改动实时下发到各服务器节点。</p>
 
     <div class="card">
       <Spinner v-if="loading" />
@@ -19,9 +19,9 @@
             <tr>
               <th>标签</th>
               <th>地址</th>
-              <th>加密方式</th>
+              <th>类型</th>
+              <th>SNI / 加密</th>
               <th>UDP over TCP</th>
-              <th>插件</th>
               <th style="width: 130px">操作</th>
             </tr>
           </thead>
@@ -29,9 +29,12 @@
             <tr v-for="tag in tags" :key="tag">
               <td><Badge>{{ tag }}</Badge></td>
               <td class="mono">{{ nodes[tag].server }}:{{ nodes[tag].server_port }}</td>
-              <td class="mono">{{ nodes[tag].method }}</td>
-              <td><Badge :color="nodes[tag].udp_over_tcp ? 'green' : 'dim'">{{ nodes[tag].udp_over_tcp ? '开启' : '关闭' }}</Badge></td>
-              <td class="mono">{{ nodes[tag].plugin || '-' }}</td>
+              <td><Badge :color="nodes[tag].type === 'anytls' ? 'cyan' : 'dim'">{{ nodes[tag].type === 'anytls' ? 'AnyTLS' : 'SS' }}</Badge></td>
+              <td class="mono">{{ nodes[tag].type === 'anytls' ? (nodes[tag].sni || nodes[tag].server) : nodes[tag].method }}</td>
+              <td>
+                <Badge v-if="nodes[tag].type === 'anytls'" :color="nodes[tag].insecure ? 'red' : 'green'">{{ nodes[tag].insecure ? '跳过证书验证' : '验证证书' }}</Badge>
+                <Badge v-else :color="nodes[tag].udp_over_tcp ? 'green' : 'dim'">{{ nodes[tag].udp_over_tcp ? '开启' : '关闭' }}</Badge>
+              </td>
               <td>
                 <div class="row">
                   <Button small @click="openEdit(tag)">编辑</Button>
@@ -47,14 +50,24 @@
     <!-- 添加 / 编辑节点 -->
     <Drawer v-model:visible="editVisible" :title="editing ? `编辑节点: ${editing}` : '添加节点'">
       <div class="form-grid">
+        <Select v-if="!editing" v-model="form.type" label="类型" :options="TYPE_OPTIONS" />
         <Input v-model="form.tag" label="标签" placeholder="唯一标识，如 hk-01" />
         <Input v-model="form.server" label="服务器地址" placeholder="example.com" />
         <Input v-model.number="form.server_port" label="端口" type="number" placeholder="443" />
-        <Select v-model="form.method" label="加密方式" :options="SS_METHODS" />
-        <Input v-model="form.password" label="密码" placeholder="节点密码" />
-        <div class="field-row">
-          <Toggle v-model="form.udp_over_tcp" label="UDP over TCP" />
-        </div>
+        <template v-if="form.type === 'anytls'">
+          <Input v-model="form.password" label="密码" placeholder="AnyTLS 密码" />
+          <Input v-model="form.sni" label="SNI" hint="留空 = 使用服务器地址" placeholder="example.com" />
+          <div class="field-row">
+            <Toggle v-model="form.insecure" label="跳过证书验证 (insecure)" />
+          </div>
+        </template>
+        <template v-else>
+          <Select v-model="form.method" label="加密方式" :options="SS_METHODS" />
+          <Input v-model="form.password" label="密码" placeholder="节点密码" />
+          <div class="field-row">
+            <Toggle v-model="form.udp_over_tcp" label="UDP over TCP" />
+          </div>
+        </template>
       </div>
       <template #footer>
         <Button @click="editVisible = false">取消</Button>
@@ -63,17 +76,17 @@
     </Drawer>
 
     <!-- 批量导入 -->
-    <Drawer v-model:visible="importVisible" title="批量导入 ss:// 链接">
+    <Drawer v-model:visible="importVisible" title="批量导入分享链接">
       <Input
         v-model="importText"
-        label="ss:// 链接"
+        label="ss:// 或 anytls:// 链接"
         hint="每行一条"
         textarea
         :rows="8"
-        placeholder="ss://base64...#tag"
+        placeholder="ss://base64...#tag&#10;anytls://password@host:port?sni=xxx&insecure=1#tag"
       />
       <div style="margin-top: 12px">
-        <Toggle v-model="importUot" label="UDP over TCP" />
+        <Toggle v-model="importUot" label="UDP over TCP (仅 ss)" />
       </div>
       <div v-if="importResults.length" class="results">
         <div v-for="r in importResults" :key="r.tag" class="result-row">
@@ -112,13 +125,20 @@ const tags = computed(() => Object.keys(nodes.value).sort())
 const editVisible = ref(false)
 const editing = ref('')
 const saving = ref(false)
+const TYPE_OPTIONS = [
+  { label: 'Shadowsocks', value: 'ss' },
+  { label: 'AnyTLS (anytls:// 链接)', value: 'anytls' },
+]
 const form = reactive({
   tag: '',
+  type: 'ss' as 'ss' | 'anytls',
   server: '',
   server_port: 443,
   method: '2022-blake3-aes-128-gcm',
   password: '',
   udp_over_tcp: false,
+  sni: '',
+  insecure: false,
 })
 
 const importVisible = ref(false)
@@ -142,11 +162,14 @@ function openAdd() {
   editing.value = ''
   Object.assign(form, {
     tag: '',
+    type: 'ss',
     server: '',
     server_port: 443,
     method: '2022-blake3-aes-128-gcm',
     password: '',
     udp_over_tcp: false,
+    sni: '',
+    insecure: false,
   })
   editVisible.value = true
 }
@@ -156,11 +179,14 @@ function openEdit(tag: string) {
   editing.value = tag
   Object.assign(form, {
     tag,
+    type: n.type === 'anytls' ? 'anytls' : 'ss',
     server: n.server,
     server_port: n.server_port,
-    method: n.method,
+    method: n.method || '2022-blake3-aes-128-gcm',
     password: n.password,
     udp_over_tcp: !!n.udp_over_tcp,
+    sni: n.sni || '',
+    insecure: !!n.insecure,
   })
   editVisible.value = true
 }
@@ -172,26 +198,29 @@ async function save() {
   }
   saving.value = true
   try {
+    const base: Record<string, unknown> =
+      form.type === 'anytls'
+        ? {
+            type: 'anytls',
+            server: form.server.trim(),
+            server_port: Number(form.server_port),
+            password: form.password.trim(),
+            sni: form.sni.trim(),
+            insecure: form.insecure,
+          }
+        : {
+            server: form.server.trim(),
+            server_port: Number(form.server_port),
+            method: form.method,
+            password: form.password,
+            udp_over_tcp: form.udp_over_tcp,
+          }
     if (editing.value) {
-      const body: Record<string, unknown> = {
-        server: form.server.trim(),
-        server_port: Number(form.server_port),
-        method: form.method,
-        password: form.password,
-        udp_over_tcp: form.udp_over_tcp,
-      }
-      if (form.tag.trim() !== editing.value) body.new_tag = form.tag.trim()
-      await put(`/api/nodes/${encodeURIComponent(editing.value)}`, body)
+      if (form.tag.trim() !== editing.value) base.new_tag = form.tag.trim()
+      await put(`/api/nodes/${encodeURIComponent(editing.value)}`, base)
       toast('节点已更新', 'success')
     } else {
-      await post('/api/nodes', {
-        tag: form.tag.trim(),
-        server: form.server.trim(),
-        server_port: Number(form.server_port),
-        method: form.method,
-        password: form.password,
-        udp_over_tcp: form.udp_over_tcp,
-      })
+      await post('/api/nodes', { tag: form.tag.trim(), ...base })
       toast('节点已添加', 'success')
     }
     editVisible.value = false
@@ -216,7 +245,7 @@ async function del(tag: string) {
 
 async function doImport() {
   if (!importText.value.trim()) {
-    toast('请粘贴 ss:// 链接', 'error')
+    toast('请粘贴 ss:// 或 anytls:// 链接', 'error')
     return
   }
   importing.value = true
