@@ -281,7 +281,8 @@ def _input_key(sid, srv):
     else:
         P = sbtool.paths(BASE)
         g = []
-        for k in ("routes", "users", "nodes", "settings", "catalog"):
+        # traffic 也纳入: 流量耗尽即刻失效缓存重算下发, 不必等 janitor 翻 exceeded 标志
+        for k in ("routes", "users", "nodes", "settings", "catalog", "traffic"):
             try:
                 g.append(os.path.getmtime(P[k]))
             except OSError:
@@ -346,6 +347,51 @@ def server_view(sid, srv, traffic=None):
 def user_server_links(name, u):
     """用户可见节点列表: [(节点名, anytls链接)], 只含已启用且分配了该用户的节点"""
     return [(n["name"], n["link"]) for n in user_nodes(name, u)]
+
+
+def fmt_sub_size(n):
+    """订阅信息节点的流量文本: 512 M / 1.5 G / 100 G"""
+    if not n or n <= 0:
+        return "0 B"
+    units = ["B", "KB", "M", "G", "T"]
+    v = float(n)
+    i = 0
+    while v >= 1024 and i < len(units) - 1:
+        v /= 1024
+        i += 1
+    s = ("%.1f" % v).rstrip("0").rstrip(".")
+    return "%s %s" % (s, units[i])
+
+
+def sub_info_nodes(v):
+    """订阅信息节点: 两个不可用的 socks (127.0.0.1:0), 名称即流量/到期状态,
+    常驻显示在客户端节点列表里, 每次拉订阅随流量/时间更新;
+    过期/耗尽后订阅只剩这两个节点, 客户端一眼可见原因"""
+    nodes = []
+    used = v["traffic"]["up"] + v["traffic"]["down"]
+    limit = v["traffic_limit"]
+    if limit:
+        remain = max(0, limit - used)
+        prefix = "流量已耗尽 | " if remain <= 0 else ""
+        nodes.append({"name": "%s已使用 %s/剩余 %s | 总流量 %s"
+                      % (prefix, fmt_sub_size(used), fmt_sub_size(remain),
+                         fmt_sub_size(limit)),
+                      "server": "127.0.0.1", "port": 0, "socks": True})
+    else:
+        nodes.append({"name": "已使用 %s | 总流量 不限" % fmt_sub_size(used),
+                      "server": "127.0.0.1", "port": 0, "socks": True})
+    exp = v["expire_at"]
+    if exp:
+        d = time.strftime("%Y年%m月%d日", time.localtime(exp))
+        if exp < time.time():
+            name = "订阅已过期 | %s已到期" % d
+        else:
+            days = max(0, int(-((time.time() - exp) // 86400)))
+            name = "订阅剩余 %d 天 | %s到期" % (days, d)
+    else:
+        name = "订阅永久有效 | 不过期"
+    nodes.append({"name": name, "server": "127.0.0.1", "port": 0, "socks": True})
+    return nodes
 
 
 def user_nodes(name, u):
@@ -1732,6 +1778,12 @@ def render_clash(nodes):
     ]
     for n in nodes:
         lines.append("  - name: %s" % json.dumps(n["name"], ensure_ascii=False))
+        if n.get("socks"):  # 信息节点: 不可用, 名称即状态
+            lines.append("    type: socks5")
+            lines.append("    server: 127.0.0.1")
+            lines.append("    port: 0")
+            lines.append("    udp: true")
+            continue
         lines.append("    type: anytls")
         lines.append("    server: %s" % json.dumps(n["server"]))
         lines.append("    port: %d" % n["port"])
@@ -1795,6 +1847,10 @@ def render_singbox(nodes):
          "url": "http://www.gstatic.com/generate_204", "interval": "3m"},
     ]
     for n in nodes:
+        if n.get("socks"):  # 信息节点: 不可用, 名称即状态
+            outbounds.append({"type": "socks", "tag": n["name"],
+                              "server": "127.0.0.1", "server_port": 0})
+            continue
         outbounds.append({
             "type": "anytls", "tag": n["name"],
             "server": n["server"], "server_port": n["port"],
@@ -1906,7 +1962,8 @@ def handle_sub(handler, token):
     if "text/html" in accept and not handler.sub_query.get("type"):
         handler.send_html(200, sub_page(name, v["links"], v["sub_url"]))
         return
-    nodes = user_nodes(name, u) if u.get("enable") else []
+    # 信息节点置顶 (流量/到期状态常驻客户端); 过期/耗尽/禁用后真实节点已被剔除, 只剩状态
+    nodes = sub_info_nodes(v) + (user_nodes(name, u) if u.get("enable") else [])
     tr = v["traffic"]
     info_hdr = {"Subscription-Userinfo": "upload=%d; download=%d; total=%d; expire=%d"
                                          % (tr["up"], tr["down"],
@@ -1923,10 +1980,12 @@ def handle_sub(handler, token):
                       dict(info_hdr, **{
                           "Content-Disposition": "attachment; filename*=UTF-8''ksing.json"}))
         return
+    links = ["socks://127.0.0.1:0#%s" % urllib.parse.quote(n["name"], safe="")
+             for n in nodes if n.get("socks")] + v["links"]
     if handler.sub_query.get("format") == "raw":
-        handler.send_text(200, "\n".join(v["links"]) + "\n")
+        handler.send_text(200, "\n".join(links) + "\n")
         return
-    raw = "\n".join(v["links"]) + "\n"
+    raw = "\n".join(links) + "\n"
     body = base64.b64encode(raw.encode()).decode()
     handler.send_text(200, body, headers=dict(info_hdr, **{
         "Content-Disposition": "attachment; filename*=UTF-8''ksing-ui"}))
