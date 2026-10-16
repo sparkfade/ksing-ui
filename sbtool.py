@@ -236,6 +236,76 @@ def enum_source(src_key, mirror):
             out.append((repo_path, e.get("size", 0), e.get("sha", "")))
     return out
 
+def build_ruleset_index(base, mirror="", force=False):
+    """构建/刷新上游规则集清单 (含未下载的), 保存 ruleset_index.json。
+    只在安装或手动「刷新清单」时调用 — 搜索/下载路径一律读本地文件, 不触发网络枚举。
+    返回 {tag: {source, url, file, size, sha}}"""
+    idx_file = os.path.join(base, "ruleset_index.json")
+    if not force and os.path.exists(idx_file):
+        idx = load_json(idx_file, {})
+        if idx:
+            return idx
+    idx = {}
+    for sk in DEFAULT_SOURCES:
+        src = SOURCES[sk]
+        try:
+            files = enum_source(sk, mirror)
+        except Exception:  # noqa: BLE001  单来源失败不影响整体
+            continue
+        for repo_path, size, sha in files:
+            tag = src["tagfn"](repo_path)
+            idx[tag] = {"source": sk,
+                        "url": "%s/%s/%s/%s" % (GH_RAW, src["repo"], src["branch"], repo_path),
+                        "file": os.path.join("rulesets", sk, repo_path),
+                        "size": size, "sha": sha}
+    if idx:
+        save_json(idx_file, idx)
+    return idx
+
+
+def download_rulesets(base, tags, mirror=""):
+    """按 tag 从本地清单 (ruleset_index.json) 索引到下载链接, 下载并登记 catalog;
+    返回 (ok_list, {tag: error})。清单未含该 tag 时明确报错, 不隐式联网构建清单"""
+    P = paths(base)
+    idx = load_json(os.path.join(base, "ruleset_index.json"), {})
+    catalog = load_json(P["catalog"], {})
+    ok, fail = [], {}
+    for tag in tags:
+        old = catalog.get(tag)
+        if old and os.path.exists(os.path.join(base, old["file"])):
+            ok.append(tag)
+            continue
+        ent = idx.get(tag)
+        if not ent:
+            fail[tag] = "规则集清单中不存在 (请先在规则集页「刷新清单」)"
+            continue
+        local_abs = os.path.join(base, ent["file"])
+        try:
+            os.makedirs(os.path.dirname(local_abs), exist_ok=True)
+            blob = http_get(ent["url"], mirror, timeout=60)
+            if ent.get("size") and len(blob) != ent["size"]:
+                raise RuntimeError("大小不符 %d != %d" % (len(blob), ent["size"]))
+            with open(local_abs, "wb") as f:
+                f.write(blob)
+            catalog[tag] = {"source": ent["source"], "file": ent["file"],
+                            "url": ent["url"], "size": len(blob), "sha": ent.get("sha", "")}
+            ok.append(tag)
+        except Exception as e:  # noqa: BLE001
+            fail[tag] = str(e)
+    if ok:
+        save_json(P["catalog"], catalog)
+    return ok, fail
+
+
+def cmd_index(args):
+    """构建/刷新规则集清单 (安装/手动一键; 搜索与下载都只读本地清单)"""
+    base = data_dir(args)
+    idx = build_ruleset_index(base, args.mirror, args.force)
+    if not idx:
+        die("清单构建失败 (网络不可达? 可用 --mirror 指定镜像重试)")
+    print("规则集清单: %d 个 (ruleset_index.json)" % len(idx))
+
+
 def cmd_update(args):
     base = data_dir(args)
     P = paths(base)
@@ -900,6 +970,26 @@ def file_sha256(fp):
     return h
 
 
+def node_outbound(tag, n):
+    """单个出站节点的 sing-box outbound 配置 (下发给节点 / 测活共用)"""
+    if n.get("type") == "anytls":
+        tls = {"enabled": True, "insecure": bool(n.get("insecure"))}
+        if n.get("sni"):
+            tls["server_name"] = n["sni"]
+        return {"type": "anytls", "tag": tag,
+                "server": n["server"], "server_port": n["server_port"],
+                "password": n["password"], "tls": tls}
+    ob = {"type": "shadowsocks", "tag": tag,
+          "server": n["server"], "server_port": n["server_port"],
+          "method": n["method"], "password": n["password"]}
+    if n.get("udp_over_tcp"):
+        ob["udp_over_tcp"] = True
+    if n.get("plugin"):
+        ob["plugin"] = n["plugin"]
+        ob["plugin_opts"] = n.get("plugin_opts", "")
+    return ob
+
+
 def build_server_config(base, sid):
     """生成下发给某节点的完整 sing-box 配置 (裸核, 仅 anytls 入站 + ss 分流出站)。
     返回 (cfg, meta), meta 含 rulesets 同步清单 [{tag,file,sha256,size}]"""
@@ -955,23 +1045,7 @@ def build_server_config(base, sid):
 
     outbounds = []
     for tag, n in nodes.items():
-        if n.get("type") == "anytls":
-            tls = {"enabled": True, "insecure": bool(n.get("insecure"))}
-            if n.get("sni"):
-                tls["server_name"] = n["sni"]
-            outbounds.append({"type": "anytls", "tag": tag,
-                              "server": n["server"], "server_port": n["server_port"],
-                              "password": n["password"], "tls": tls})
-            continue
-        ob = {"type": "shadowsocks", "tag": tag,
-              "server": n["server"], "server_port": n["server_port"],
-              "method": n["method"], "password": n["password"]}
-        if n.get("udp_over_tcp"):
-            ob["udp_over_tcp"] = True
-        if n.get("plugin"):
-            ob["plugin"] = n["plugin"]
-            ob["plugin_opts"] = n.get("plugin_opts", "")
-        outbounds.append(ob)
+        outbounds.append(node_outbound(tag, n))
     outbounds.append({"type": "direct", "tag": "direct"})
 
     rules = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}]
@@ -1601,6 +1675,12 @@ def main():
                    help="GitHub 镜像前缀, 如 https://gh-proxy.com (也可用环境变量 SBTOOL_MIRROR)")
     p.add_argument("--force", action="store_true", help="强制重新下载")
     p.set_defaults(fn=cmd_update)
+
+    p = sub.add_parser("index", help="构建/刷新规则集清单 (仅清单, 不下载文件)")
+    p.add_argument("--mirror", default=os.environ.get("SBTOOL_MIRROR", ""),
+                   help="GitHub 镜像前缀, 如 https://gh-proxy.com (也可用环境变量 SBTOOL_MIRROR)")
+    p.add_argument("--force", action="store_true", help="已有清单也强制重新枚举")
+    p.set_defaults(fn=cmd_index)
 
     p = sub.add_parser("search", help="查询规则集, 输出 tag/路径/url")
     p.add_argument("keywords", nargs="*", help="关键字(可多个, 与逻辑), 如: search geoip cn")

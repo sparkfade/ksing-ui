@@ -6,21 +6,25 @@
       <div class="spacer"></div>
       <input v-model="q" class="search" placeholder="搜索关键字，空格分隔" @input="debouncedSearch" />
       <Select v-model="source" :options="sourceOptions" style="width: 200px" />
+      <Button :loading="building" @click="buildIndex">刷新清单</Button>
     </div>
-    <p class="page-sub">来自内置目录的 geoip/geosite 规则集，可在分流规则中引用。</p>
+    <p class="page-sub">来自内置目录的 geoip/geosite 规则集，可在分流规则中引用；未下载的选中时会自动下载。</p>
 
     <div class="card">
       <Spinner v-if="loading" />
-      <Empty v-else-if="!list.length" text="无匹配的规则集" />
+      <Empty v-else-if="!list.length" text="无匹配的规则集">
+        <Button small :loading="building" @click="buildIndex">构建规则集清单</Button>
+      </Empty>
       <div v-else class="table-wrap">
         <table class="tbl">
           <thead>
             <tr>
               <th>标签</th>
               <th>来源</th>
+              <th>状态</th>
               <th>本地路径</th>
               <th>远程 URL</th>
-              <th style="width: 90px">操作</th>
+              <th style="width: 150px">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -28,10 +32,14 @@
               <td class="mono">{{ r.tag }}</td>
               <td><Badge color="purple">{{ r.source }}</Badge></td>
               <td>
-                <div class="row" style="gap: 6px">
+                <Badge :color="r.downloaded ? 'green' : 'yellow'">{{ r.downloaded ? '已下载' : '未下载' }}</Badge>
+              </td>
+              <td>
+                <div v-if="r.downloaded" class="row" style="gap: 6px">
                   <span class="mono muted ellipsis">{{ r.path }}</span>
                   <CopyButton :text="r.path" small />
                 </div>
+                <span v-else class="muted">-</span>
               </td>
               <td>
                 <div class="row" style="gap: 6px">
@@ -40,7 +48,10 @@
                 </div>
               </td>
               <td>
-                <Button small variant="primary" @click="useForRoute(r.tag)">用于分流</Button>
+                <div class="row">
+                  <Button v-if="!r.downloaded" small variant="primary" :loading="downloading === r.tag" @click="download(r.tag)">下载</Button>
+                  <Button v-else small variant="primary" @click="useForRoute(r.tag)">用于分流</Button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -59,7 +70,7 @@ import Empty from '@/component/ui/Empty.vue'
 import Select from '@/component/ui/Select.vue'
 import Spinner from '@/component/ui/Spinner.vue'
 import CopyButton from '@/component/widget/CopyButton.vue'
-import { get } from '@/util/request'
+import { get, post } from '@/util/request'
 import { toast } from '@/util/toast'
 import type { RulesetItem, RulesetSource } from '@/types'
 
@@ -70,6 +81,8 @@ const sources = ref<RulesetSource[]>([])
 const list = ref<RulesetItem[]>([])
 const total = ref(0)
 const loading = ref(true)
+const building = ref(false)
+const downloading = ref('')
 
 const sourceOptions = computed(() => [
   { label: '全部来源', value: '' },
@@ -101,6 +114,36 @@ async function search() {
 
 function useForRoute(tag: string) {
   router.push({ path: '/routes', query: { set: tag } })
+}
+
+async function buildIndex() {
+  building.value = true
+  try {
+    const r = await post<{ total: number }>('/api/rulesets/index', {})
+    toast(`规则集清单已刷新, 共 ${r.total} 个`, 'success')
+    search()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    building.value = false
+  }
+}
+
+async function download(tag: string) {
+  downloading.value = tag
+  try {
+    const r = await post<{ ok: string[]; fail: Record<string, string> }>('/api/rulesets/download', { tags: [tag] })
+    if (r.fail && r.fail[tag]) {
+      toast(`下载失败: ${r.fail[tag]}`, 'error')
+      return
+    }
+    toast(`${tag} 已下载`, 'success')
+    search()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    downloading.value = ''
+  }
 }
 
 watch(source, search)

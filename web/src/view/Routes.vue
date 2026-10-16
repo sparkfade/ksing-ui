@@ -90,11 +90,17 @@
               v-for="r in setResults"
               :key="r.tag"
               class="rs-item"
-              @click="pickSet(r.tag)"
+              :title="r.downloaded ? '已下载' : '未下载, 点击自动下载'"
+              @click="pickSet(r)"
             >
               <span class="mono">{{ r.tag }}</span>
               <Badge color="dim">{{ r.source }}</Badge>
+              <Badge :color="r.downloaded ? 'green' : 'yellow'">{{ r.downloaded ? '已下载' : '未下载' }}</Badge>
             </div>
+          </div>
+          <div v-else-if="setSearch.trim() && !setSearching" class="rs-empty">
+            <span class="muted">无匹配规则集</span>
+            <Button v-if="!setIndexed" small :loading="setBuilding" @click="buildSetIndex">构建规则集清单</Button>
           </div>
         </div>
 
@@ -165,6 +171,9 @@ const ufOutbound = ref('direct')
 const addVisible = ref(false)
 const setSearch = ref('')
 const setResults = ref<RulesetItem[]>([])
+const setSearching = ref(false)
+const setIndexed = ref(true)
+const setBuilding = ref(false)
 const form = reactive({
   rule_set: [] as string[],
   domain: '',
@@ -348,18 +357,51 @@ function searchSets() {
       setResults.value = []
       return
     }
+    setSearching.value = true
     try {
-      const r = await get<{ results: RulesetItem[] }>(`/api/rulesets?q=${encodeURIComponent(q)}`)
+      const r = await get<{ results: RulesetItem[]; indexed: boolean }>(`/api/rulesets?q=${encodeURIComponent(q)}`)
+      setIndexed.value = r.indexed
       setResults.value = r.results.filter((x) => !form.rule_set.includes(x.tag)).slice(0, 20)
     } catch {
       /* 搜索失败静默 */
+    } finally {
+      setSearching.value = false
     }
   }, 250)
 }
 
-function pickSet(tag: string) {
-  if (!form.rule_set.includes(tag)) form.rule_set = [...form.rule_set, tag]
-  setResults.value = setResults.value.filter((x) => x.tag !== tag)
+async function buildSetIndex() {
+  setBuilding.value = true
+  try {
+    await post('/api/rulesets/index', {})
+    toast('规则集清单已构建', 'success')
+    setIndexed.value = true
+    searchSets()
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    setBuilding.value = false
+  }
+}
+
+async function pickSet(r: RulesetItem) {
+  if (!r.downloaded) {
+    // 未下载: 自动下载后再选中
+    toast(`正在下载 ${r.tag} …`)
+    try {
+      const res = await post<{ ok: string[]; fail: Record<string, string> }>('/api/rulesets/download', { tags: [r.tag] })
+      if (res.fail && res.fail[r.tag]) {
+        toast(`下载失败: ${res.fail[r.tag]}`, 'error')
+        return
+      }
+      toast(`${r.tag} 已下载`, 'success')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      return
+    }
+  }
+  if (!form.rule_set.includes(r.tag)) form.rule_set = [...form.rule_set, r.tag]
+  setResults.value = setResults.value.filter((x) => x.tag !== r.tag)
 }
 
 function splitCsv(text: string): string[] {
@@ -526,5 +568,13 @@ onMounted(async () => {
 
 .rs-item:hover {
   background: var(--c-primary-soft);
+}
+
+.rs-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12.5px;
 }
 </style>

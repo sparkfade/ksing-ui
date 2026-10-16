@@ -21,16 +21,21 @@ import json
 import hmac
 import mimetypes
 import os
+import random
 import re
 import secrets
 import shutil
 import signal
+import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # C/POSIX locale 的主机 stdout 是 latin-1, 中文输出会崩; 强制 UTF-8
@@ -739,6 +744,127 @@ def h_nodes_del(ctx):
     return 200, {"ok": True}
 
 
+# ---- 出站测活
+
+SB_BIN_CANDIDATES = ("sing-box", "/usr/local/bin/sing-box", "/usr/bin/sing-box",
+                     "/opt/sing-box/sing-box")
+
+
+def find_singbox():
+    """面板本机可用的 sing-box 二进制 (有则做真连接测试)"""
+    for c in SB_BIN_CANDIDATES:
+        try:
+            p = shutil.which(c) if "/" not in c else (c if os.access(c, os.X_OK) else None)
+        except OSError:
+            p = None
+        if p:
+            return p
+    return ""
+
+
+def _err_str(e):
+    s = str(e) or e.__class__.__name__
+    return s[:200]
+
+
+def _test_via_singbox(sb_bin, tag, node):
+    """真连接测试: 临时 sing-box (mixed 代理) + 该出站, 经代理请求 generate_204"""
+    port = random.randint(20000, 60000)
+    cfg = {
+        "log": {"level": "error"},
+        "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": port}],
+        "outbounds": [sbtool.node_outbound(tag, node), {"type": "direct", "tag": "direct"}],
+        "route": {"rules": [], "final": tag},
+    }
+    with tempfile.TemporaryDirectory(prefix="ksing-test-") as td:
+        cfgp = os.path.join(td, "cfg.json")
+        with open(cfgp, "w") as f:
+            json.dump(cfg, f)
+        proc = subprocess.Popen([sb_bin, "run", "-c", cfgp, "-D", td],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    err = (proc.stderr.read() or b"").decode(errors="replace").strip()
+                    return {"ok": False, "mode": "proxy",
+                            "error": "sing-box 启动失败: %s" % err[-160:]}
+                try:
+                    s = socket.create_connection(("127.0.0.1", port), timeout=1)
+                    s.close()
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            else:
+                return {"ok": False, "mode": "proxy", "error": "代理端口就绪超时"}
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({
+                "http": "http://127.0.0.1:%d" % port,
+                "https": "http://127.0.0.1:%d" % port}))
+            t1 = time.time()
+            req = urllib.request.Request("http://www.gstatic.com/generate_204",
+                                         headers={"User-Agent": "curl/8.0"})
+            with opener.open(req, timeout=15) as resp:
+                code = resp.status
+            latency = int((time.time() - t1) * 1000)
+            if code == 204:
+                return {"ok": True, "mode": "proxy", "latency_ms": latency}
+            return {"ok": False, "mode": "proxy", "error": "HTTP 状态码 %d" % code}
+        except urllib.error.HTTPError as e:
+            if e.code == 502:
+                return {"ok": False, "mode": "proxy",
+                        "error": "出站连接失败 (节点不可达或认证被拒)"}
+            return {"ok": False, "mode": "proxy", "error": "HTTP %d: %s" % (e.code, e.reason)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "mode": "proxy", "error": _err_str(e)}
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                proc.kill()
+
+
+def _test_tcp(tag, node):
+    """无 sing-box 时的降级探活: TCP 可达 (+anytls TLS 握手与证书信息)"""
+    server, port = node["server"], int(node.get("server_port") or 0)
+    try:
+        t1 = time.time()
+        s = socket.create_connection((server, port), timeout=5)
+        latency = int((time.time() - t1) * 1000)
+        detail = "TCP 可达"
+        if node.get("type") == "anytls":
+            ctx = ssl.create_default_context()
+            sni = node.get("sni") or server
+            if node.get("insecure"):
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            with ctx.wrap_socket(s, server_hostname=sni) as ss:
+                cert = ss.getpeercert()
+                if cert:
+                    cn = next((x[1] for x in cert.get("subject", ())
+                               if x[0] == "commonName"), "-")
+                    detail = "TLS 握手成功, CN=%s, 有效期至 %s" % (cn, cert.get("notAfter", "-"))
+                else:
+                    detail = "TLS 握手成功 (未验证证书)"
+        else:
+            s.close()
+        return {"ok": True, "mode": "tcp", "latency_ms": latency, "detail": detail,
+                "hint": "面板未安装 sing-box, 仅做 TCP/TLS 探活 (验证不了代理认证)"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "mode": "tcp", "error": _err_str(e)}
+
+
+def h_nodes_test(ctx):
+    tag = ctx.match.group(1)
+    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+    if tag not in nodes:
+        raise ApiError("节点不存在", 404)
+    sb_bin = find_singbox()
+    if sb_bin:
+        return 200, _test_via_singbox(sb_bin, tag, nodes[tag])
+    return 200, _test_tcp(tag, nodes[tag])
+
+
 def h_nodes_import(ctx):
     text = ctx.body.get("text") or ""
     links = [l.strip() for l in text.splitlines()
@@ -1084,20 +1210,46 @@ def h_rulesets(ctx):
     q = (ctx.query.get("q") or "").lower()
     source = ctx.query.get("source") or ""
     cat = sbtool.load_json(sbtool.paths(BASE)["catalog"], {})
+    idx = sbtool.load_json(os.path.join(BASE, "ruleset_index.json"), {})
+    # 合并: 已下载 (catalog) + 上游清单 (index, 含未下载), 标记 downloaded
+    merged = {}
+    for tag, ent in cat.items():
+        merged[tag] = {"source": ent["source"], "url": ent["url"],
+                       "path": os.path.join(BASE, ent["file"]), "downloaded": True}
+    for tag, ent in idx.items():
+        if tag not in merged:
+            merged[tag] = {"source": ent["source"], "url": ent["url"],
+                           "path": "", "downloaded": False}
     kws = [k for k in q.split() if k]
     out = []
-    for tag in sorted(cat):
-        ent = cat[tag]
+    for tag in sorted(merged):
+        ent = merged[tag]
         if source and ent["source"] != source:
             continue
         tl = tag.lower()
         if kws and not all(k in tl for k in kws):
             continue
         out.append({"tag": tag, "source": ent["source"], "url": ent["url"],
-                    "path": os.path.join(BASE, ent["file"])})
+                    "path": ent["path"], "downloaded": ent["downloaded"]})
         if len(out) >= 200:
             break
-    return 200, {"total": len(cat), "results": out}
+    return 200, {"total": len(merged), "results": out, "indexed": bool(idx)}
+
+
+def h_ruleset_index(ctx):
+    """手动构建/刷新上游规则集清单 (网络枚举 GitHub); 安装时也会预构建一次"""
+    with PROC_LOCK:
+        idx = call_sbtool(sbtool.build_ruleset_index, BASE, "", True)
+    return 200, {"ok": True, "total": len(idx)}
+
+
+def h_rulesets_download(ctx):
+    tags = [str(t).strip() for t in (ctx.body.get("tags") or []) if str(t).strip()]
+    if not tags:
+        raise ApiError("需要 tags")
+    with PROC_LOCK:
+        ok, fail = call_sbtool(sbtool.download_rulesets, BASE, tags)
+    return 200, {"ok": ok, "fail": fail}
 
 
 def h_ruleset_sources(ctx):
@@ -1694,6 +1846,7 @@ ROUTES = [
     ("POST", r"/api/nodes/import", h_nodes_import, "admin"),
     ("PUT", r"/api/nodes/([^/]+)", h_nodes_update, "admin"),
     ("DELETE", r"/api/nodes/([^/]+)", h_nodes_del, "admin"),
+    ("POST", r"/api/nodes/([^/]+)/test", h_nodes_test, "admin"),
     ("GET", r"/api/servers", h_servers_list, "admin"),
     ("POST", r"/api/servers", h_servers_add, "admin"),
     ("PUT", r"/api/servers/([0-9a-f]{8})", h_servers_update, "admin"),
@@ -1718,6 +1871,8 @@ ROUTES = [
     ("DELETE", r"/api/routes/final", h_routes_final_del, "admin"),
     ("GET", r"/api/rulesets", h_rulesets, "admin"),
     ("GET", r"/api/rulesets/sources", h_ruleset_sources, "admin"),
+    ("POST", r"/api/rulesets/index", h_ruleset_index, "admin"),
+    ("POST", r"/api/rulesets/download", h_rulesets_download, "admin"),
     ("GET", r"/api/settings", h_settings_get, "admin"),
     ("PUT", r"/api/settings", h_settings_put, "admin"),
     ("POST", r"/api/settings/admin", h_settings_admin, "admin"),

@@ -145,6 +145,7 @@ export interface RulesetItem {
   source: string
   url: string
   path: string
+  downloaded?: boolean
 }
 
 export interface RulesetSource {

@@ -75,6 +75,13 @@ install)
   mkdir -p "$DATA_DIR"
   chmod 700 "$DATA_DIR"
   python3 "$APP_DIR/sbtool.py" --dir "$DATA_DIR" set --panel-listen :: --panel-port "$PANEL_PORT" --agent-port "$AGENT_PORT" >/dev/null
+  echo "  预构建规则集清单 (仅清单不下载文件, 需访问 GitHub) ..."
+  if timeout 180 python3 "$APP_DIR/sbtool.py" --dir "$DATA_DIR" index >/dev/null 2>&1; then
+    echo "  规则集清单已就绪"
+  else
+    echo "  !! 清单构建失败 (网络问题, 不影响面板运行)" >&2
+    echo "     面板启动后在「规则集」页点「刷新清单」即可补上。" >&2
+  fi
 
   echo "[3/4] 构建节点用 sing-box 二进制 (官方源码 + with_v2ray_api) ..."
   if [ -x "$DATA_DIR/bin/sing-box-linux-amd64" ]; then

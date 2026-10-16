@@ -4,6 +4,7 @@
       <h2>出站节点</h2>
       <div class="spacer"></div>
       <Button @click="importVisible = true">批量导入</Button>
+      <Button :loading="testingAll" @click="testAll">全部测试</Button>
       <Button variant="primary" @click="openAdd">添加节点</Button>
     </div>
     <p class="page-sub">出站节点（Shadowsocks / AnyTLS），供分流规则与默认出口选择；改动实时下发到各服务器节点。</p>
@@ -22,7 +23,9 @@
               <th>类型</th>
               <th>SNI / 加密</th>
               <th>UDP over TCP</th>
-              <th style="width: 130px">操作</th>
+              <th>证书验证</th>
+              <th>状态</th>
+              <th style="width: 190px">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -32,11 +35,30 @@
               <td><Badge :color="nodes[tag].type === 'anytls' ? 'cyan' : 'dim'">{{ nodes[tag].type === 'anytls' ? 'AnyTLS' : 'SS' }}</Badge></td>
               <td class="mono">{{ nodes[tag].type === 'anytls' ? (nodes[tag].sni || nodes[tag].server) : nodes[tag].method }}</td>
               <td>
-                <Badge v-if="nodes[tag].type === 'anytls'" :color="nodes[tag].insecure ? 'red' : 'green'">{{ nodes[tag].insecure ? '跳过证书验证' : '验证证书' }}</Badge>
-                <Badge v-else :color="nodes[tag].udp_over_tcp ? 'green' : 'dim'">{{ nodes[tag].udp_over_tcp ? '开启' : '关闭' }}</Badge>
+                <template v-if="nodes[tag].type !== 'anytls'">
+                  <Badge :color="nodes[tag].udp_over_tcp ? 'green' : 'dim'">{{ nodes[tag].udp_over_tcp ? '开启' : '关闭' }}</Badge>
+                </template>
+                <span v-else class="muted">-</span>
+              </td>
+              <td>
+                <template v-if="nodes[tag].type === 'anytls'">
+                  <Badge :color="nodes[tag].insecure ? 'red' : 'green'">{{ nodes[tag].insecure ? '跳过' : '验证' }}</Badge>
+                </template>
+                <span v-else class="muted">-</span>
+              </td>
+              <td>
+                <template v-if="tests[tag]">
+                  <span v-if="tests[tag].loading" class="muted">测试中…</span>
+                  <span v-else-if="tests[tag].ok" class="test-ok" :title="tests[tag].detail || ''">
+                    ✓ {{ tests[tag].latency_ms }}ms<span v-if="tests[tag].mode === 'tcp'" class="test-weak"> (探活)</span>
+                  </span>
+                  <span v-else class="test-fail" :title="tests[tag].error">✗ 失败</span>
+                </template>
+                <span v-else class="muted">-</span>
               </td>
               <td>
                 <div class="row">
+                  <Button small :loading="tests[tag]?.loading" @click="testNode(tag)">测试</Button>
                   <Button small @click="openEdit(tag)">编辑</Button>
                   <Button small variant="danger" @click="del(tag)">删除</Button>
                 </div>
@@ -314,6 +336,48 @@ async function del(tag: string) {
   }
 }
 
+// ---- 出站测活
+
+interface TestResult {
+  loading: boolean
+  ok?: boolean
+  latency_ms?: number
+  mode?: string
+  detail?: string
+  error?: string
+}
+
+const tests = ref<Record<string, TestResult>>({})
+const testingAll = ref(false)
+
+async function testNode(tag: string) {
+  tests.value = { ...tests.value, [tag]: { loading: true } }
+  try {
+    const r = await post<TestResult>(`/api/nodes/${encodeURIComponent(tag)}/test`, {})
+    tests.value = {
+      ...tests.value,
+      [tag]: { ...r, loading: false },
+    }
+    if (r.ok) {
+      toast(`${tag}: 可用, ${r.latency_ms}ms${r.mode === 'tcp' ? ' (仅探活)' : ''}`, 'success')
+    } else {
+      toast(`${tag}: ${r.error}`, 'error')
+    }
+  } catch (e) {
+    tests.value = { ...tests.value, [tag]: { loading: false, ok: false, error: (e as Error).message } }
+    toast((e as Error).message, 'error')
+  }
+}
+
+async function testAll() {
+  testingAll.value = true
+  try {
+    for (const tag of tags.value) await testNode(tag)
+  } finally {
+    testingAll.value = false
+  }
+}
+
 async function doImport() {
   if (!importText.value.trim()) {
     toast('请粘贴 ss:// 或 anytls:// 链接', 'error')
@@ -412,5 +476,24 @@ onMounted(load)
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
+}
+
+.test-ok {
+  color: var(--c-green, #16a34a);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.test-fail {
+  color: var(--c-red, #dc2626);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: help;
+}
+
+.test-weak {
+  opacity: 0.7;
+  font-size: 11px;
 }
 </style>
