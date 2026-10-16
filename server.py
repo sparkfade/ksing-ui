@@ -363,8 +363,13 @@ def fmt_sub_size(n):
     return "%s %s" % (s, units[i])
 
 
+INFO_SOCKS_ADDR = "127.0.0.1"   # 信息节点地址: 客户端本机回环, 连不上 = 不可用
+INFO_SOCKS_PORT = 65535         # port 0 会被部分客户端当无效节点过滤掉, 用 65535
+INFO_SOCKS_USERINFO = base64.b64encode(b":").decode().rstrip("=")  # "Og": socks:// 分享链接的空用户信息 (base64("user:pass") 去补位)
+
+
 def sub_info_nodes(v):
-    """订阅信息节点: 两个不可用的 socks (127.0.0.1:0), 名称即流量/到期状态,
+    """订阅信息节点: 两个不可用的 socks (127.0.0.1:65535), 名称即流量/到期状态,
     常驻显示在客户端节点列表里, 每次拉订阅随流量/时间更新;
     过期/耗尽后订阅只剩这两个节点, 客户端一眼可见原因"""
     nodes = []
@@ -376,10 +381,10 @@ def sub_info_nodes(v):
         nodes.append({"name": "%s已使用 %s/剩余 %s | 总流量 %s"
                       % (prefix, fmt_sub_size(used), fmt_sub_size(remain),
                          fmt_sub_size(limit)),
-                      "server": "127.0.0.1", "port": 0, "socks": True})
+                      "server": INFO_SOCKS_ADDR, "port": INFO_SOCKS_PORT, "socks": True})
     else:
         nodes.append({"name": "已使用 %s | 总流量 不限" % fmt_sub_size(used),
-                      "server": "127.0.0.1", "port": 0, "socks": True})
+                      "server": INFO_SOCKS_ADDR, "port": INFO_SOCKS_PORT, "socks": True})
     exp = v["expire_at"]
     if exp:
         d = time.strftime("%Y年%m月%d日", time.localtime(exp))
@@ -390,7 +395,7 @@ def sub_info_nodes(v):
             name = "订阅剩余 %d 天 | %s到期" % (days, d)
     else:
         name = "订阅永久有效 | 不过期"
-    nodes.append({"name": name, "server": "127.0.0.1", "port": 0, "socks": True})
+    nodes.append({"name": name, "server": INFO_SOCKS_ADDR, "port": INFO_SOCKS_PORT, "socks": True})
     return nodes
 
 
@@ -1780,8 +1785,8 @@ def render_clash(nodes):
         lines.append("  - name: %s" % json.dumps(n["name"], ensure_ascii=False))
         if n.get("socks"):  # 信息节点: 不可用, 名称即状态
             lines.append("    type: socks5")
-            lines.append("    server: 127.0.0.1")
-            lines.append("    port: 0")
+            lines.append("    server: %s" % json.dumps(n["server"]))
+            lines.append("    port: %d" % n["port"])
             lines.append("    udp: true")
             continue
         lines.append("    type: anytls")
@@ -1849,7 +1854,7 @@ def render_singbox(nodes):
     for n in nodes:
         if n.get("socks"):  # 信息节点: 不可用, 名称即状态
             outbounds.append({"type": "socks", "tag": n["name"],
-                              "server": "127.0.0.1", "server_port": 0})
+                              "server": n["server"], "server_port": n["port"]})
             continue
         outbounds.append({
             "type": "anytls", "tag": n["name"],
@@ -1980,7 +1985,8 @@ def handle_sub(handler, token):
                       dict(info_hdr, **{
                           "Content-Disposition": "attachment; filename*=UTF-8''ksing.json"}))
         return
-    links = ["socks://127.0.0.1:0#%s" % urllib.parse.quote(n["name"], safe="")
+    links = ["socks://%s@%s:%d#%s" % (INFO_SOCKS_USERINFO, n["server"], n["port"],
+                                      urllib.parse.quote(n["name"], safe=""))
              for n in nodes if n.get("socks")] + v["links"]
     if handler.sub_query.get("format") == "raw":
         handler.send_text(200, "\n".join(links) + "\n")
