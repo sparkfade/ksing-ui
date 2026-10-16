@@ -1950,38 +1950,31 @@ def render_clash(nodes):
         "mode: rule",
         "log-level: warning",
         "external-controller: 127.0.0.1:9090",
-        "geodata-mode: true",          # geosite:cn 等需要 geosite.dat
-        "geo-auto-update: true",
-        "geo-update-interval: 24",
-        "geox-url:",
-        "  geosite: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
-        "  geoip: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
-        "  mmdb: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb",
         "tun:",
         "  enable: true",
         "  stack: mixed",
         "  auto-route: true",
         "  auto-detect-interface: true",
-        "  dns-hijack:",            # 拦截所有 DNS 请求, 防泄露
+        "  dns-hijack:",            # 拦截所有明文 DNS (含硬编码 DNS 的应用), 防泄露
         "    - any:53",
         "    - tcp://any:53",
         "dns:",
         "  enable: true",
-        "  listen: 0.0.0.0:1053",
+        "  listen: 127.0.0.1:1053",   # 仅本机监听 (0.0.0.0 会暴露到局域网)
         "  enhanced-mode: fake-ip",  # fakeip 兜底: 域名先路由后解析, 不把域名泄露给本地 DNS
         "  fake-ip-range: 198.18.0.1/16",
         "  fake-ip-filter:",         # 国内域名不走 fakeip, 直接用国内 DNS 出真实 IP
-        "    - '*.lan'",
-        "    - '*.local'",
+        "    - '*.lan'",            #   (rule-set 与规则同源, 经代理下载必有; geosite:cn 依赖
+        "    - '*.local'",          #    GitHub 直连下载的 geosite.dat, 国内常失败)
         "    - 'localhost.*'",
-        "    - 'geosite:cn'",
+        "    - 'rule-set:cn-site'",
         "  default-nameserver:",     # 仅用于解析下面的 DoH 服务器域名
         "    - 223.5.5.5",
         "    - 119.29.29.29",
-        "  nameserver:",
-        "    - https://223.6.6.6/dns-query",
-        "    - https://119.29.29.29/dns-query",
-        "  proxy-server-nameserver:",  # 节点域名解析只用国内 DNS
+        "  nameserver:",             # 兜底解析走代理加密 DNS: 未分类域名 (dnsleak 测试的
+        "    - https://1.1.1.1/dns-query#节点选择",  # 随机子域等) 不得查到国内 DNS
+        "    - https://8.8.8.8/dns-query#节点选择",
+        "  proxy-server-nameserver:",  # 节点域名解析只用国内 DNS (代理未就绪时可用)
         "    - https://223.6.6.6/dns-query",
         "  respect-rules: true",       # DNS 查询遵循路由规则 (#节点选择 后缀走代理)
         "  nameserver-policy:",
