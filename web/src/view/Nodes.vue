@@ -49,6 +49,21 @@
 
     <!-- 添加 / 编辑节点 -->
     <Drawer v-model:visible="editVisible" :title="editing ? `编辑节点: ${editing}` : '添加节点'">
+      <!-- 链接一键解析 (仅添加模式): 参考 3x-ui, 粘贴分享链接自动填表 -->
+      <div v-if="!editing" class="parse-box">
+        <div class="parse-title">从分享链接导入</div>
+        <div class="parse-row">
+          <input
+            v-model="parseLink"
+            class="ctrl parse-input"
+            placeholder="粘贴 ss:// 或 anytls:// 链接"
+            autocomplete="off"
+            @keydown.enter.prevent="doParse"
+          />
+          <Button :loading="parsing" @click="doParse">解析</Button>
+        </div>
+        <p class="parse-hint">解析后自动填充下方表单，可继续手动修改</p>
+      </div>
       <div class="form-grid">
         <Select v-if="!editing" v-model="form.type" label="类型" :options="TYPE_OPTIONS" />
         <Input v-model="form.tag" label="标签" placeholder="唯一标识，如 hk-01" />
@@ -64,6 +79,8 @@
         <template v-else>
           <Select v-model="form.method" label="加密方式" :options="SS_METHODS" />
           <Input v-model="form.password" label="密码" placeholder="节点密码" />
+          <Input v-model="form.plugin" label="插件 (可选)" placeholder="obfs / v2ray-plugin" />
+          <Input v-model="form.plugin_opts" label="插件参数 (可选)" placeholder="obfs=http;obfs-host=example.com" />
           <div class="field-row">
             <Toggle v-model="form.udp_over_tcp" label="UDP over TCP" />
           </div>
@@ -139,7 +156,53 @@ const form = reactive({
   udp_over_tcp: false,
   sni: '',
   insecure: false,
+  plugin: '',
+  plugin_opts: '',
 })
+
+const parseLink = ref('')
+const parsing = ref(false)
+
+async function doParse() {
+  const link = parseLink.value.trim()
+  if (!link) {
+    toast('请粘贴 ss:// 或 anytls:// 链接', 'error')
+    return
+  }
+  parsing.value = true
+  try {
+    const r = await post<{
+      type: 'ss' | 'anytls'
+      tag: string
+      server: string
+      server_port: number
+      password: string
+      method?: string
+      plugin?: string
+      plugin_opts?: string
+      sni?: string
+      insecure?: boolean
+    }>('/api/nodes/parse', { link })
+    form.type = r.type
+    form.server = r.server
+    form.server_port = r.server_port
+    form.password = r.password
+    form.tag = r.tag || form.tag
+    if (r.type === 'anytls') {
+      form.sni = r.sni || ''
+      form.insecure = !!r.insecure
+    } else {
+      form.method = r.method || form.method
+      form.plugin = r.plugin || ''
+      form.plugin_opts = r.plugin_opts || ''
+    }
+    toast(r.type === 'anytls' ? '已解析 AnyTLS 链接' : '已解析 SS 链接', 'success')
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    parsing.value = false
+  }
+}
 
 const importVisible = ref(false)
 const importText = ref('')
@@ -170,7 +233,10 @@ function openAdd() {
     udp_over_tcp: false,
     sni: '',
     insecure: false,
+    plugin: '',
+    plugin_opts: '',
   })
+  parseLink.value = ''
   editVisible.value = true
 }
 
@@ -187,6 +253,8 @@ function openEdit(tag: string) {
     udp_over_tcp: !!n.udp_over_tcp,
     sni: n.sni || '',
     insecure: !!n.insecure,
+    plugin: n.plugin || '',
+    plugin_opts: n.plugin_opts || '',
   })
   editVisible.value = true
 }
@@ -214,6 +282,9 @@ async function save() {
             method: form.method,
             password: form.password,
             udp_over_tcp: form.udp_over_tcp,
+            ...(form.plugin.trim()
+              ? { plugin: form.plugin.trim(), plugin_opts: form.plugin_opts.trim() }
+              : {}),
           }
     if (editing.value) {
       if (form.tag.trim() !== editing.value) base.new_tag = form.tag.trim()
@@ -269,6 +340,58 @@ onMounted(load)
 </script>
 
 <style scoped>
+.parse-box {
+  border: 1px dashed var(--c-border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 14px;
+  background: var(--c-bg-soft, transparent);
+}
+
+.parse-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--c-text-dim);
+  margin-bottom: 8px;
+}
+
+.parse-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.parse-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--c-border);
+  background: var(--c-inset);
+  color: var(--c-text);
+  font-size: 12.5px;
+  font-family: var(--font);
+  outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.parse-input::placeholder {
+  color: var(--c-text-faint);
+}
+
+.parse-input:focus {
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
+}
+
+.parse-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--c-text-dim);
+  opacity: 0.8;
+}
+
 .field-row {
   display: flex;
   align-items: flex-end;

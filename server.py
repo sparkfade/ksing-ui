@@ -611,6 +611,30 @@ def h_nodes_list(ctx):
     return 200, sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
 
 
+def h_nodes_parse(ctx):
+    """解析单条 ss:// 或 anytls:// 分享链接, 返回表单字段 (添加页一键填充用)"""
+    link = (ctx.body.get("link") or "").strip()
+    if not link:
+        raise ApiError("需要 link")
+    low = link.lower()
+    if low.startswith("anytls://"):
+        info = call_sbtool(sbtool.parse_anytls_link, link)
+        return 200, {
+            "type": "anytls",
+            "tag": info["tag"], "server": info["server"], "server_port": info["port"],
+            "password": info["password"], "sni": info["sni"], "insecure": info["insecure"],
+        }
+    if low.startswith("ss://"):
+        info = call_sbtool(sbtool.parse_ss_link, link)
+        return 200, {
+            "type": "ss",
+            "tag": info["tag"], "server": info["server"], "server_port": info["port"],
+            "method": info["method"], "password": info["password"],
+            "plugin": info["plugin"] or "", "plugin_opts": info["plugin_opts"] or "",
+        }
+    raise ApiError("仅支持 ss:// 或 anytls:// 链接")
+
+
 def h_nodes_add(ctx):
     b = ctx.body
     tag = (b.get("tag") or "").strip()
@@ -1666,6 +1690,7 @@ ROUTES = [
     ("GET", r"/api/status", h_status, "admin"),
     ("GET", r"/api/nodes", h_nodes_list, "admin"),
     ("POST", r"/api/nodes", h_nodes_add, "admin"),
+    ("POST", r"/api/nodes/parse", h_nodes_parse, "admin"),
     ("POST", r"/api/nodes/import", h_nodes_import, "admin"),
     ("PUT", r"/api/nodes/([^/]+)", h_nodes_update, "admin"),
     ("DELETE", r"/api/nodes/([^/]+)", h_nodes_del, "admin"),
