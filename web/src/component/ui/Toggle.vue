@@ -30,24 +30,24 @@ input {
 }
 
 .track {
-  width: 36px;
-  height: 20px;
+  width: 38px;
+  height: 21px;
   border-radius: 20px;
-  background: var(--c-border);
+  background: var(--c-border-strong);
   position: relative;
-  transition: background 0.2s ease;
+  transition: background 0.2s var(--ease);
   flex-shrink: 0;
 }
 
 .thumb {
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: 2.5px;
+  left: 2.5px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
   background: var(--c-text-dim);
-  transition: all 0.2s ease;
+  transition: all 0.2s var(--ease);
 }
 
 .toggle.on .track {
@@ -55,7 +55,7 @@ input {
 }
 
 .toggle.on .thumb {
-  left: 18px;
+  left: 19px;
   background: var(--c-on-primary);
 }
 

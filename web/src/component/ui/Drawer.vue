@@ -1,24 +1,26 @@
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="overlay" @click.self="close">
-      <div class="drawer" :style="{ width }">
-        <div class="head">
-          <h3>{{ title }}</h3>
-          <button class="x" @click="close">×</button>
-        </div>
-        <div class="body">
-          <slot />
-        </div>
-        <div v-if="$slots.footer" class="foot">
-          <slot name="footer" />
+    <Transition name="draw">
+      <div v-if="visible" class="overlay" @click.self="close">
+        <div class="drawer" :style="{ width }">
+          <div class="head">
+            <h3>{{ title }}</h3>
+            <button class="x" @click="close">×</button>
+          </div>
+          <div class="body">
+            <slot />
+          </div>
+          <div v-if="$slots.footer" class="foot">
+            <slot name="footer" />
+          </div>
         </div>
       </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-withDefaults(defineProps<{ title?: string; width?: string }>(), { title: '', width: '440px' })
+withDefaults(defineProps<{ title?: string; width?: string }>(), { title: '', width: '460px' })
 const visible = defineModel<boolean>('visible', { required: true })
 
 function close() {
@@ -31,6 +33,7 @@ function close() {
   position: fixed;
   inset: 0;
   background: var(--c-overlay);
+  backdrop-filter: blur(3px);
   z-index: 100;
 }
 
@@ -39,37 +42,26 @@ function close() {
   top: 0;
   right: 0;
   height: 100%;
-  max-width: 94vw;
+  max-width: 96vw;
   background: var(--c-card);
-  border-left: 1px solid var(--c-border);
+  border-left: 1px solid var(--c-border-strong);
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-pop);
-  animation: slide-in 0.18s ease;
-}
-
-@keyframes slide-in {
-  from {
-    transform: translateX(40px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
 }
 
 .head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--c-border);
 }
 
 .head h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 15.5px;
+  font-weight: 600;
 }
 
 .x {
@@ -79,8 +71,9 @@ function close() {
   font-size: 20px;
   cursor: pointer;
   line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: all 0.15s var(--ease);
 }
 
 .x:hover {
@@ -89,16 +82,36 @@ function close() {
 }
 
 .body {
-  padding: 16px 18px;
+  padding: 18px 20px;
   overflow-y: auto;
   flex: 1;
 }
 
 .foot {
-  padding: 12px 18px;
+  padding: 14px 20px;
   border-top: 1px solid var(--c-border);
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.draw-enter-active,
+.draw-leave-active {
+  transition: opacity 0.2s var(--ease);
+}
+
+.draw-enter-active .drawer,
+.draw-leave-active .drawer {
+  transition: transform 0.22s var(--ease);
+}
+
+.draw-enter-from,
+.draw-leave-to {
+  opacity: 0;
+}
+
+.draw-enter-from .drawer,
+.draw-leave-to .drawer {
+  transform: translateX(48px);
 }
 </style>

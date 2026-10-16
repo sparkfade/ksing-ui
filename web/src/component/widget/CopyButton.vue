@@ -46,20 +46,21 @@ async function copy() {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: 7px;
   border: 1px solid var(--c-border);
   background: transparent;
   color: var(--c-text-dim);
   font-size: 12.5px;
   font-family: var(--font);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.15s var(--ease);
   white-space: nowrap;
 }
 
 .copy:hover {
   color: var(--c-primary);
   border-color: var(--c-primary);
+  background: var(--c-primary-soft);
 }
 
 .copy.sm {

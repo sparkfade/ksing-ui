@@ -1,13 +1,15 @@
 <template>
   <div class="login-page">
+    <div class="theme-corner"><ThemeToggle /></div>
+
     <div class="card login-card">
       <div class="logo">
-        <svg viewBox="0 0 24 24" width="30" height="30">
+        <svg viewBox="0 0 24 24" width="34" height="34">
           <path fill="var(--c-primary)" d="M13.6 3.5 5.5 13.6h5.2l-1.3 6.9 8.1-10.1h-5.2l1.3-6.9z" />
         </svg>
-        <h1>KSING-UI</h1>
+        <h1>ksing-ui</h1>
       </div>
-      <p class="sub muted">{{ setup ? '初始化管理员账号' : 'sing-box 代理面板' }}</p>
+      <p class="sub muted">{{ setup ? '首次使用：初始化管理员账号' : 'sing-box 中控面板' }}</p>
 
       <Spinner v-if="loading" :size="18" text="连接服务器…" />
 
@@ -38,6 +40,7 @@ import { useRouter } from 'vue-router'
 import Button from '@/component/ui/Button.vue'
 import Input from '@/component/ui/Input.vue'
 import Spinner from '@/component/ui/Spinner.vue'
+import ThemeToggle from '@/component/widget/ThemeToggle.vue'
 import { get, post } from '@/util/request'
 import { login } from '@/util/auth'
 
@@ -104,14 +107,23 @@ async function submit() {
   justify-content: center;
   padding: 20px;
   background:
-    radial-gradient(600px 300px at 20% 0%, var(--c-glow), transparent),
+    radial-gradient(640px 320px at 20% 0%, var(--c-glow), transparent),
+    radial-gradient(520px 280px at 85% 100%, var(--c-glow), transparent),
     var(--c-bg);
 }
 
+.theme-corner {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 5;
+}
+
 .login-card {
-  width: min(360px, 100%);
-  padding: 34px 30px 24px;
+  width: min(380px, 100%);
+  padding: 36px 32px 26px;
   box-shadow: var(--shadow-pop);
+  animation: page-in 0.3s var(--ease);
 }
 
 .logo {
@@ -123,13 +135,13 @@ async function submit() {
 
 .logo h1 {
   margin: 0;
-  font-size: 22px;
-  letter-spacing: 2px;
+  font-size: 23px;
+  letter-spacing: 1.5px;
 }
 
 .sub {
   text-align: center;
-  margin: 8px 0 24px;
+  margin: 8px 0 26px;
   font-size: 13px;
 }
 
@@ -148,6 +160,6 @@ async function submit() {
 .ver {
   text-align: center;
   font-size: 12px;
-  margin: 22px 0 0;
+  margin: 24px 0 0;
 }
 </style>

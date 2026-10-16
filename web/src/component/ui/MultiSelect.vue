@@ -54,19 +54,26 @@ function toggle(v: string) {
 .label {
   font-size: 12.5px;
   color: var(--c-text-dim);
+  font-weight: 500;
 }
 
 .hint {
   font-style: normal;
   margin-left: 6px;
   opacity: 0.75;
+  font-weight: 400;
 }
 
 .box {
   border: 1px solid var(--c-border);
-  border-radius: 6px;
-  background: var(--c-bg);
+  border-radius: 10px;
+  background: var(--c-inset);
   padding: 6px;
+  transition: border-color 0.15s var(--ease);
+}
+
+.box:focus-within {
+  border-color: var(--c-primary);
 }
 
 .chips {
@@ -76,7 +83,7 @@ function toggle(v: string) {
 }
 
 .opts {
-  max-height: 140px;
+  max-height: 150px;
   overflow-y: auto;
 }
 
@@ -84,10 +91,11 @@ function toggle(v: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 8px;
-  border-radius: 4px;
+  padding: 6px 9px;
+  border-radius: 7px;
   cursor: pointer;
   font-size: 13px;
+  transition: background-color 0.12s var(--ease);
 }
 
 .opt:hover {
@@ -99,7 +107,7 @@ function toggle(v: string) {
 }
 
 .none {
-  padding: 8px;
+  padding: 10px;
   font-size: 13px;
 }
 </style>

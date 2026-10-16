@@ -1,10 +1,11 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>分流规则</h2>
       <div class="spacer"></div>
       <Button variant="primary" @click="openAdd()">添加规则</Button>
     </div>
+    <p class="page-sub">规则按顺序匹配，越靠前优先级越高；未命中规则的流量走默认出口。</p>
 
     <div class="grid2">
       <div class="card">
@@ -42,51 +43,36 @@
     </div>
 
     <div class="card">
-      <h3 class="card-title">规则列表<span class="muted" style="font-weight: 400; font-size: 12.5px">按顺序匹配，越靠前优先级越高</span></h3>
+      <h3 class="card-title">规则列表<span class="sub">{{ data.rules.length }} 条</span></h3>
       <Spinner v-if="loading" />
-      <Empty v-else-if="!data.rules.length" text="暂无规则，全部流量走默认出口" />
-      <div v-else class="table-wrap">
-        <table class="tbl">
-          <thead>
-            <tr>
-              <th style="width: 46px">#</th>
-              <th style="width: 110px">动作</th>
-              <th>匹配条件</th>
-              <th style="width: 140px">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(r, i) in data.rules" :key="i">
-              <td class="muted">{{ i + 1 }}</td>
-              <td>
-                <Badge v-if="r.action === 'reject'" color="red">reject</Badge>
-                <Badge v-else :color="r.outbound === 'direct' ? 'dim' : 'cyan'">{{ r.outbound }}</Badge>
-                <Badge v-if="r.dns" color="purple" style="margin-left: 4px">dns:{{ r.dns }}</Badge>
-              </td>
-              <td class="cond">
-                <span v-for="s in r.rule_set" :key="'s' + s" class="chip purple">{{ s }}</span>
-                <span v-for="u in r.users" :key="'u' + u" class="chip green">{{ u }}</span>
-                <span v-for="n in r.nodes" :key="'n' + n" class="chip">⛁ {{ serverName(n) }}</span>
-                <span v-for="t in condText(r)" :key="t" class="chip">{{ t }}</span>
-                <span v-if="!r.rule_set?.length && !r.nodes?.length && !condText(r).length" class="muted">全部流量</span>
-              </td>
-              <td>
-                <div class="row" style="gap: 4px">
-                  <Button small :disabled="i === 0" @click="move(i, -1)">上移</Button>
-                  <Button small :disabled="i === data.rules.length - 1" @click="move(i, 1)">下移</Button>
-                  <Button small variant="danger" @click="delRule(i)">删除</Button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <Empty v-else-if="!data.rules.length" text="暂无规则，全部流量走默认出口">
+        <Button small variant="primary" @click="openAdd()">添加第一条规则</Button>
+      </Empty>
+      <div v-else class="rule-list">
+        <div v-for="(r, i) in data.rules" :key="i" class="rule-card">
+          <span class="idx mono muted">{{ i + 1 }}</span>
+          <div class="rule-cond">
+            <span v-for="s in r.rule_set" :key="'s' + s" class="chip purple">{{ s }}</span>
+            <span v-for="u in r.users" :key="'u' + u" class="chip green">👤 {{ u }}</span>
+            <span v-for="n in r.nodes" :key="'n' + n" class="chip">⛁ {{ serverName(n) }}</span>
+            <span v-for="t in condText(r)" :key="t" class="chip">{{ t }}</span>
+          </div>
+          <Badge v-if="r.action === 'reject'" color="red">拒绝</Badge>
+          <Badge v-else :color="r.outbound === 'direct' ? 'dim' : 'cyan'">{{ r.outbound }}</Badge>
+          <Badge v-if="r.dns" color="purple">dns:{{ r.dns }}</Badge>
+          <div class="row rule-acts">
+            <Button small :disabled="i === 0" title="上移" @click="move(i, -1)">↑</Button>
+            <Button small :disabled="i === data.rules.length - 1" title="下移" @click="move(i, 1)">↓</Button>
+            <Button small variant="danger" @click="delRule(i)">删除</Button>
+          </div>
+        </div>
       </div>
     </div>
 
     <!-- 添加规则 -->
-    <Drawer v-model:visible="addVisible" title="添加规则" width="480px">
+    <Drawer v-model:visible="addVisible" title="添加规则" width="500px">
       <p class="muted" style="margin: 0 0 14px; font-size: 12.5px">
-        各条件之间为「与」关系，至少需要一个匹配条件（规则集/域名/IP/端口）。规则按顺序匹配。
+        各条件之间为「与」关系，至少需要一个匹配条件（规则集/域名/IP/端口）。规则追加到列表末尾。
       </p>
 
       <div class="form-grid">
@@ -408,7 +394,7 @@ async function saveRule() {
   saving.value = true
   try {
     await post('/api/routes', body)
-    toast('规则已添加', 'success')
+    toast('规则已添加，已自动下发到相关节点', 'success')
     addVisible.value = false
     load()
   } catch (e) {
@@ -441,9 +427,43 @@ onMounted(async () => {
   border-bottom: 1px dashed var(--c-border);
 }
 
-.cond {
-  white-space: normal !important;
-  max-width: 520px;
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rule-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-inset);
+  transition: border-color 0.15s var(--ease);
+  flex-wrap: wrap;
+}
+
+.rule-card:hover {
+  border-color: var(--c-border-strong);
+}
+
+.idx {
+  width: 22px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.rule-cond {
+  flex: 1;
+  min-width: 200px;
+  white-space: normal;
+}
+
+.rule-acts {
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .fw {
@@ -464,28 +484,31 @@ onMounted(async () => {
 .lbl {
   font-size: 12.5px;
   color: var(--c-text-dim);
+  font-weight: 500;
 }
 
 .rs-input {
   width: 100%;
-  padding: 8px 11px;
-  border-radius: 6px;
+  padding: 9px 12px;
+  border-radius: 10px;
   border: 1px solid var(--c-border);
-  background: var(--c-bg);
+  background: var(--c-inset);
   color: var(--c-text);
   font-size: 13.5px;
   font-family: var(--font);
   outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
 }
 
 .rs-input:focus {
   border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
 }
 
 .rs-list {
   border: 1px solid var(--c-border);
-  border-radius: 6px;
-  background: var(--c-bg);
+  border-radius: 10px;
+  background: var(--c-inset);
   max-height: 180px;
   overflow-y: auto;
 }
@@ -495,9 +518,10 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 7px 11px;
+  padding: 8px 12px;
   cursor: pointer;
   font-size: 12.5px;
+  transition: background-color 0.12s var(--ease);
 }
 
 .rs-item:hover {

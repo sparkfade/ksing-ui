@@ -1,14 +1,11 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>证书</h2>
       <div class="spacer"></div>
       <Button small @click="load" :loading="loading">刷新</Button>
     </div>
-
-    <p class="muted" style="margin: -6px 0 14px; font-size: 12.5px">
-      证书由节点上的 sing-box 自动申请与续签 (Let's Encrypt ACME)；域名证书需在添加节点时绑定域名。
-    </p>
+    <p class="page-sub">证书由节点上的 sing-box 自动申请与续签 (Let's Encrypt ACME)；域名证书需在添加节点时绑定域名。</p>
 
     <div class="card">
       <Spinner v-if="loading && !certs.length" />
@@ -30,7 +27,7 @@
               <td>
                 <span class="dot" :class="{ on: c.online }"></span>
                 <span style="font-weight: 600">{{ c.name }}</span>
-                <div class="mono muted sid">{{ c.sid }}</div>
+                <div class="mono faint sid">{{ c.sid }}</div>
               </td>
               <td class="mono">{{ c.domain || 'IP 模式' }}</td>
               <td><Badge :color="modeColor(c.cert_mode)">{{ modeLabel(c.cert_mode) }}</Badge></td>
@@ -101,19 +98,5 @@ onUnmounted(() => clearInterval(timer))
 .sid {
   font-size: 11.5px;
   margin-top: 3px;
-}
-
-.dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--c-text-dim);
-  margin-right: 7px;
-}
-
-.dot.on {
-  background: var(--c-green);
-  box-shadow: 0 0 5px var(--c-green);
 }
 </style>

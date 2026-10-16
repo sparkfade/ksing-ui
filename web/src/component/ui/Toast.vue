@@ -29,11 +29,11 @@ import { toastList } from '@/util/toast'
 }
 
 .toast {
-  padding: 9px 20px;
-  border-radius: 8px;
+  padding: 10px 20px;
+  border-radius: 10px;
   font-size: 13.5px;
   background: var(--c-card-2);
-  border: 1px solid var(--c-border);
+  border: 1px solid var(--c-border-strong);
   color: var(--c-text);
   box-shadow: var(--shadow-pop);
   max-width: 70vw;
@@ -56,7 +56,7 @@ import { toastList } from '@/util/toast'
 
 .t-enter-active,
 .t-leave-active {
-  transition: all 0.25s ease;
+  transition: all 0.25s var(--ease);
 }
 
 .t-enter-from,

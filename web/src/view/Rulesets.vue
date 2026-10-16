@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>规则集</h2>
       <span class="muted">共 {{ total }} 个</span>
@@ -7,6 +7,7 @@
       <input v-model="q" class="search" placeholder="搜索关键字，空格分隔" @input="debouncedSearch" />
       <Select v-model="source" :options="sourceOptions" style="width: 200px" />
     </div>
+    <p class="page-sub">来自内置目录的 geoip/geosite 规则集，可在分流规则中引用。</p>
 
     <div class="card">
       <Spinner v-if="loading" />
@@ -117,18 +118,20 @@ onMounted(async () => {
 <style scoped>
 .search {
   width: 240px;
-  padding: 7px 11px;
-  border-radius: 6px;
+  padding: 8px 12px;
+  border-radius: 10px;
   border: 1px solid var(--c-border);
-  background: var(--c-card);
+  background: var(--c-inset);
   color: var(--c-text);
   font-size: 13.5px;
   font-family: var(--font);
   outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
 }
 
 .search:focus {
   border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
 }
 
 .ellipsis {
@@ -137,5 +140,11 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
+}
+
+@media (max-width: 767px) {
+  .search {
+    width: 100%;
+  }
 }
 </style>

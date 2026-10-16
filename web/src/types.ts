@@ -52,6 +52,7 @@ export interface ServerItem {
   online: boolean
   agent_version: string
   last_error: string
+  sb_running?: boolean | null
   applied_hash: string
   desired_hash: string
   synced: boolean

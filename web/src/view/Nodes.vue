@@ -1,15 +1,18 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>出站节点</h2>
       <div class="spacer"></div>
       <Button @click="importVisible = true">批量导入</Button>
       <Button variant="primary" @click="openAdd">添加节点</Button>
     </div>
+    <p class="page-sub">Shadowsocks 出站，供分流规则与默认出口选择；改动实时下发到各服务器节点。</p>
 
     <div class="card">
       <Spinner v-if="loading" />
-      <Empty v-else-if="!tags.length" text="暂无节点，点击右上角添加" />
+      <Empty v-else-if="!tags.length" text="暂无出站节点">
+        <Button small variant="primary" @click="openAdd">添加第一个出站</Button>
+      </Empty>
       <div v-else class="table-wrap">
         <table class="tbl">
           <thead>

@@ -13,11 +13,14 @@ withDefaults(
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 9px;
+  gap: 4px;
+  padding: 2px 10px;
   border-radius: 20px;
   font-size: 12px;
+  font-weight: 500;
   border: 1px solid transparent;
   white-space: nowrap;
+  line-height: 1.5;
 }
 
 .cyan {

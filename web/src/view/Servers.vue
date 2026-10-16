@@ -1,19 +1,18 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>服务器节点</h2>
       <div class="spacer"></div>
       <Button small @click="load" :loading="loading">刷新</Button>
       <Button variant="primary" @click="openAdd">添加节点</Button>
     </div>
-
-    <p class="muted" style="margin: -6px 0 14px; font-size: 12.5px">
-      节点通过一键命令接入；配置变更实时（秒级）自动下发到相关节点并生效，无需手动应用。
-    </p>
+    <p class="page-sub">节点通过一键命令接入；配置变更实时（秒级）自动下发到相关节点并生效，无需手动应用。</p>
 
     <div class="card">
       <Spinner v-if="loading && !servers.length" />
-      <Empty v-else-if="!servers.length" text="暂无服务器节点，点击右上角添加" />
+      <Empty v-else-if="!servers.length" text="暂无服务器节点">
+        <Button small variant="primary" @click="openAdd">添加第一个节点</Button>
+      </Empty>
       <div v-else class="table-wrap">
         <table class="tbl">
           <thead>
@@ -21,11 +20,10 @@
               <th>名称</th>
               <th>地址</th>
               <th>证书</th>
-              <th>在线状态</th>
-              <th>同步状态</th>
-              <th>下放用户</th>
-              <th>流量 (上行/下行)</th>
-              <th>最近在线</th>
+              <th>状态</th>
+              <th>用户</th>
+              <th>流量</th>
+              <th>启用</th>
               <th style="width: 290px">操作</th>
             </tr>
           </thead>
@@ -33,7 +31,7 @@
             <tr v-for="s in servers" :key="s.sid">
               <td>
                 <Badge>{{ s.name }}</Badge>
-                <div class="mono muted sid">{{ s.sid }}</div>
+                <div class="mono faint sid">{{ s.sid }}</div>
               </td>
               <td class="mono">
                 <template v-if="s.cert_mode === 'acme'">
@@ -47,26 +45,30 @@
                 <div class="cert-exp" :class="certExpCls(s)" :title="s.cert_issuer ? `签发者: ${s.cert_issuer}` : ''">{{ certExpText(s) }}</div>
               </td>
               <td>
-                <Badge :color="s.online ? 'green' : 'dim'">
-                  <span class="dot" :class="{ on: s.online }"></span>{{ s.online ? '在线' : '离线' }}
-                </Badge>
-                <span v-if="s.online && s.agent_version" class="mono muted" style="margin-left: 6px">v{{ s.agent_version }}</span>
+                <div class="row" style="gap: 6px">
+                  <Badge :color="s.online ? 'green' : 'dim'">
+                    <span class="dot" :class="{ on: s.online }"></span>{{ s.online ? '在线' : '离线' }}
+                  </Badge>
+                  <Badge v-if="s.sb_running === true" color="cyan">核心运行中</Badge>
+                  <Badge v-else-if="s.sb_running === false" color="red">核心停止</Badge>
+                  <Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge>
+                </div>
+                <div class="mono faint" style="font-size: 11.5px; margin-top: 3px">
+                  {{ fmtAgo(s.last_seen) }}<template v-if="s.agent_version"> · v{{ s.agent_version }}</template>
+                </div>
+                <div v-if="s.last_error" class="last-err" :title="s.last_error">⚠ {{ truncate(s.last_error, 40) }}</div>
               </td>
-              <td><Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge></td>
               <td>
                 <Badge v-if="!s.users?.length" color="dim">全部</Badge>
                 <Badge v-else color="cyan" :title="s.users.join('\n')" style="cursor: default">{{ s.users.length }} 人</Badge>
               </td>
               <td class="mono">↑{{ fmtBytes(s.traffic?.up) }} ↓{{ fmtBytes(s.traffic?.down) }}</td>
-              <td class="muted">
-                {{ fmtAgo(s.last_seen) }}
-                <div v-if="s.last_error" class="last-err" :title="s.last_error">⚠ {{ truncate(s.last_error, 40) }}</div>
-              </td>
+              <td><Toggle :model-value="s.enabled" @update:model-value="toggleEnable(s, $event)" /></td>
               <td>
                 <div class="row" style="gap: 6px">
                   <Button small @click="openEdit(s)">编辑</Button>
                   <Button small @click="openRoute(s)">分流</Button>
-                  <Button small title="重置部署命令，旧 token 立即失效" @click="resetToken(s)">重新部署</Button>
+                  <Button small title="重新生成部署命令，旧 token 立即失效" @click="resetToken(s)">重新部署</Button>
                   <Button small @click="preview(s)">配置</Button>
                   <Button small variant="danger" @click="del(s)">删除</Button>
                 </div>
@@ -98,9 +100,6 @@
           <MultiSelect v-model="form.users" :options="userNames" label="下放用户" hint="不选 = 全部用户" />
         </div>
         <Input v-model="form.note" label="备注" placeholder="可留空" />
-        <div v-if="editing" class="field-row">
-          <Toggle v-model="form.enabled" label="启用节点" />
-        </div>
       </div>
       <template #footer>
         <Button @click="editVisible = false">取消</Button>
@@ -108,7 +107,7 @@
       </template>
     </Modal>
 
-    <!-- 安装命令（token 仅显示一次） -->
+    <!-- 部署命令（token 仅显示一次） -->
     <Modal v-model:visible="installVisible" title="重新部署节点">
       <p class="warn-big">请立即复制部署命令，token 仅显示这一次。</p>
       <CodeBox :text="installCmd" multiline />
@@ -196,31 +195,14 @@ const form = reactive({
   unsafe_ok: false,
   users: [] as string[],
   note: '',
-  enabled: true,
 })
 
 const installVisible = ref(false)
 const installCmd = ref('')
 const caFingerprint = ref('')
 
-async function showInstall(cmd: string) {
-  installCmd.value = cmd
-  installVisible.value = true
-  try {
-    const r = await get<{ agent_port: number; ca_fingerprint: string }>('/api/agent-info')
-    caFingerprint.value = r.ca_fingerprint || ''
-  } catch {
-    caFingerprint.value = ''
-  }
-}
-
 const routeVisible = ref(false)
 const routeServer = ref<ServerItem>()
-
-function openRoute(s: ServerItem) {
-  routeServer.value = s
-  routeVisible.value = true
-}
 
 const cfgVisible = ref(false)
 const cfgLoading = ref(false)
@@ -230,10 +212,6 @@ const cfgText = computed(() => (cfg.value ? JSON.stringify(cfg.value.config, nul
 
 function certModeLabel(m: ServerItem['cert_mode']): string {
   return { acme: '域名证书', selfip: 'IP 自签', unsafe: '不安全' }[m || 'selfip']
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) + '…' : text
 }
 
 function certModeColor(m: ServerItem['cert_mode']): 'green' | 'yellow' | 'red' {
@@ -250,11 +228,15 @@ function certExpText(s: ServerItem): string {
 }
 
 function certExpCls(s: ServerItem): string {
-  if (!s.cert_not_after) return 'muted'
+  if (!s.cert_not_after) return 'faint'
   const now = Date.now() / 1000
   if (s.cert_not_after <= now) return 'exp-red'
   if ((s.cert_not_after - now) / 86400 < 10) return 'exp-yellow'
-  return 'muted'
+  return 'faint'
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) + '…' : text
 }
 
 async function load() {
@@ -284,7 +266,6 @@ function openAdd() {
     unsafe_ok: false,
     users: [],
     note: '',
-    enabled: true,
   })
   editVisible.value = true
 }
@@ -300,7 +281,6 @@ function openEdit(s: ServerItem) {
     unsafe_ok: false,
     users: [...(s.users || [])],
     note: s.note,
-    enabled: s.enabled,
   })
   editVisible.value = true
 }
@@ -333,7 +313,7 @@ async function save() {
         port,
         users: form.users,
         note: form.note,
-        enabled: form.enabled,
+        enabled: editing.value.enabled,
         cert_mode: form.cert_mode,
         domain,
         acme_email: acmeEmail,
@@ -361,14 +341,40 @@ async function save() {
   }
 }
 
+async function toggleEnable(s: ServerItem, enabled: boolean) {
+  try {
+    await put(`/api/servers/${s.sid}`, { enabled })
+    s.enabled = enabled
+    toast(enabled ? `已启用 ${s.name}` : `已禁用 ${s.name}`, 'success')
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  }
+}
+
+async function showInstall(cmd: string) {
+  installCmd.value = cmd
+  installVisible.value = true
+  try {
+    const r = await get<{ agent_port: number; ca_fingerprint: string }>('/api/agent-info')
+    caFingerprint.value = r.ca_fingerprint || ''
+  } catch {
+    caFingerprint.value = ''
+  }
+}
+
 async function resetToken(s: ServerItem) {
-  if (!(await confirmDialog(`重置节点「${s.name}」的部署令牌？\n旧 token 立即失效，节点需重新部署。`))) return
+  if (!(await confirmDialog(`重新部署节点「${s.name}」？\n将生成新的部署命令，旧 token 立即失效。`))) return
   try {
     const r = await post<ServerCreated>(`/api/servers/${s.sid}/token`)
     showInstall(r.install_command)
   } catch (e) {
     toast((e as Error).message, 'error')
   }
+}
+
+function openRoute(s: ServerItem) {
+  routeServer.value = s
+  routeVisible.value = true
 }
 
 async function preview(s: ServerItem) {
@@ -411,27 +417,37 @@ onUnmounted(() => clearInterval(timer))
   margin-top: 3px;
 }
 
-.dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--c-text-dim);
-  margin-right: 6px;
+.cert-exp {
+  font-size: 11.5px;
+  margin-top: 3px;
 }
 
-.dot.on {
-  background: var(--c-green);
-  box-shadow: 0 0 5px var(--c-green);
+.exp-red {
+  color: var(--c-red);
+}
+
+.exp-yellow {
+  color: var(--c-yellow);
+}
+
+.last-err {
+  color: var(--c-red);
+  font-size: 11.5px;
+  margin-top: 3px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fw {
   grid-column: 1 / -1;
 }
 
-.field-row {
-  display: flex;
-  align-items: flex-end;
+.cert-tip {
+  align-self: end;
+  margin: 0;
+  font-size: 12.5px;
   padding-bottom: 8px;
 }
 
@@ -447,35 +463,5 @@ onUnmounted(() => clearInterval(timer))
   font-size: 12px;
   line-height: 1.6;
   word-break: break-all;
-}
-
-.cert-exp {
-  font-size: 11.5px;
-  margin-top: 3px;
-}
-
-.exp-red {
-  color: var(--c-red);
-}
-
-.exp-yellow {
-  color: var(--c-yellow);
-}
-
-.cert-tip {
-  align-self: end;
-  margin: 0;
-  font-size: 12.5px;
-  padding-bottom: 8px;
-}
-
-.last-err {
-  color: var(--c-red);
-  font-size: 11.5px;
-  margin-top: 3px;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 </style>

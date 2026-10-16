@@ -16,10 +16,10 @@ defineProps<{ text: string; multiline?: boolean }>()
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--c-bg);
+  background: var(--c-inset);
   border: 1px solid var(--c-border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: 10px;
+  padding: 9px 12px;
 }
 
 .txt {
@@ -28,7 +28,7 @@ defineProps<{ text: string; multiline?: boolean }>()
   font-size: 12.5px;
   color: var(--c-text);
   word-break: break-all;
-  line-height: 1.5;
+  line-height: 1.6;
   max-height: 72px;
   overflow-y: auto;
 }

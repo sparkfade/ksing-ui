@@ -1,55 +1,62 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>用户</h2>
       <div class="spacer"></div>
       <Button variant="primary" @click="openAdd">添加用户</Button>
     </div>
+    <p class="page-sub">用户被禁用、到期或超额后，订阅自动失效并秒级从节点剔除。</p>
 
     <div class="card">
       <Spinner v-if="loading" />
-      <Empty v-else-if="!users.length" text="暂无用户" />
+      <Empty v-else-if="!users.length" text="暂无用户">
+        <Button small variant="primary" @click="openAdd">添加第一个用户</Button>
+      </Empty>
       <div v-else class="table-wrap">
         <table class="tbl">
           <thead>
             <tr>
-              <th>用户名</th>
+              <th>用户</th>
               <th>状态</th>
+              <th style="min-width: 170px">用量</th>
+              <th>到期时间</th>
+              <th>重置日</th>
+              <th>订阅 token</th>
               <th>启用</th>
-              <th>AnyTLS 密码</th>
-              <th>面板登录</th>
-              <th>流量 (已用/上限)</th>
-              <th>备注</th>
-              <th style="width: 300px">操作</th>
+              <th style="width: 330px">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="u in users" :key="u.name">
-              <td><Badge>{{ u.name }}</Badge></td>
+              <td>
+                <Badge>{{ u.name }}</Badge>
+                <div v-if="u.note" class="faint" style="font-size: 11.5px; margin-top: 3px">{{ u.note }}</div>
+              </td>
               <td><Badge :color="userStatus(u).color">{{ userStatus(u).text }}</Badge></td>
+              <td>
+                <div class="use">
+                  <div class="meter"><i :class="useCls(u)" :style="{ width: usePct(u) + '%' }"></i></div>
+                  <span class="mono use-txt" :class="{ 'over-red': trafficOver(u) }">
+                    {{ fmtBytes(usedBytes(u)) }} / {{ u.traffic_limit ? fmtBytes(u.traffic_limit) : '不限' }}
+                  </span>
+                </div>
+              </td>
+              <td class="mono" :class="{ 'over-red': isExpired(u) }">{{ u.expire_at ? fmtTime(u.expire_at) : '永久' }}</td>
+              <td class="muted">{{ u.reset_day ? `每月 ${u.reset_day} 号` : '不重置' }}</td>
+              <td>
+                <div class="row" style="gap: 6px">
+                  <span class="mono muted">{{ u.token.slice(0, 6) }}…</span>
+                  <CopyButton :text="u.token" small />
+                </div>
+              </td>
               <td><Toggle :model-value="u.enable" @update:model-value="toggleEnable(u, $event)" /></td>
               <td>
                 <div class="row" style="gap: 6px">
-                  <span class="mono">{{ revealed.has(u.name) ? u.password : '••••••••' }}</span>
-                  <button class="eye" :title="revealed.has(u.name) ? '隐藏' : '显示'" @click="toggleReveal(u.name)">
-                    {{ revealed.has(u.name) ? '隐藏' : '显示' }}
-                  </button>
-                  <CopyButton :text="u.password" small />
-                </div>
-              </td>
-              <td><Badge :color="u.has_panel_password ? 'green' : 'dim'">{{ u.has_panel_password ? '已设置' : '未设置' }}</Badge></td>
-              <td class="mono" :class="{ 'over-red': trafficOver(u) }">
-                {{ fmtBytes(usedBytes(u)) }} / {{ u.traffic_limit ? fmtBytes(u.traffic_limit) : '不限' }}
-              </td>
-              <td class="muted">{{ u.note || '-' }}</td>
-              <td>
-                <div class="row" style="gap: 6px">
-                  <Button small @click="openLink(u)">链接</Button>
-                  <Button small @click="openRoute(u)">分流</Button>
+                  <Button small @click="openLink(u)">订阅</Button>
                   <Button small @click="openEdit(u)">编辑</Button>
-                  <Button small title="重置订阅地址，旧地址立即失效" @click="resetSub(u)">订阅</Button>
-                  <Button small title="当前周期流量清零并恢复使用" @click="resetUsage(u)">流量</Button>
+                  <Button small @click="openRoute(u)">分流</Button>
                   <Button small title="按天数顺延到期时间" @click="openRenew(u)">续期</Button>
+                  <Button small title="当前周期流量清零并恢复使用" @click="resetUsage(u)">流量</Button>
                   <Button small variant="danger" @click="del(u)">删除</Button>
                 </div>
               </td>
@@ -76,18 +83,28 @@
       </template>
     </Drawer>
 
-    <!-- 查看链接 -->
-    <Drawer v-model:visible="linkVisible" :title="`分享链接: ${current?.name ?? ''}`">
+    <!-- 订阅与节点 -->
+    <Drawer v-model:visible="linkVisible" :title="`订阅 · ${current?.name ?? ''}`">
       <template v-if="current">
-        <h4 class="sec">AnyTLS 链接</h4>
-        <template v-if="current.link">
-          <CodeBox :text="current.link" />
-          <div class="qr-row">
-            <QrCode :text="current.link" />
-            <CopyButton :text="current.link" label="复制链接" />
+        <h4 class="sec">AnyTLS 密码</h4>
+        <div class="row" style="gap: 6px">
+          <span class="mono">{{ revealed.has(current.name) ? current.password : '••••••••' }}</span>
+          <button class="eye" @click="toggleReveal(current.name)">{{ revealed.has(current.name) ? '隐藏' : '显示' }}</button>
+          <CopyButton :text="current.password" small />
+        </div>
+
+        <h4 class="sec">节点链接</h4>
+        <template v-if="currentLinks.length">
+          <div v-for="(link, i) in currentLinks" :key="i" class="link-item">
+            <p class="link-name">{{ linkName(link, i) }}</p>
+            <CodeBox :text="link" />
+            <div class="qr-row">
+              <QrCode v-if="i === 0" :text="link" />
+              <CopyButton :text="link" :label="`复制链接 ${i + 1}`" />
+            </div>
           </div>
         </template>
-        <p v-else class="muted">用户已禁用，无分享链接</p>
+        <p v-else class="muted">暂无可用节点链接（用户不可用或未分配节点）。</p>
 
         <h4 class="sec">订阅地址</h4>
         <template v-if="subEntries.length">
@@ -96,9 +113,16 @@
             <CodeBox :text="e.url" class="sub-box" />
             <CopyButton :text="e.url" label="复制" />
           </div>
+          <div class="qr-row">
+            <QrCode :text="subEntries[0].url" />
+          </div>
           <p class="muted hint">按客户端类型选择订阅地址；无法识别时会按 UA 自动判断，直接填 v2rayN 那条通常也能用。</p>
         </template>
         <p v-else class="muted">暂无订阅地址</p>
+        <div class="row" style="margin-top: 10px">
+          <Button small @click="resetSubToken">重置订阅链接</Button>
+          <span class="muted" style="font-size: 12.5px">旧订阅链接立即失效，需重新分发</span>
+        </div>
 
         <h4 class="sec">可见节点</h4>
         <p class="muted" style="margin: 0 0 10px; font-size: 12.5px">控制该用户的订阅与可用节点；不选 = 全部节点。</p>
@@ -106,6 +130,9 @@
         <div class="row" style="margin-top: 12px; justify-content: flex-end">
           <Button small variant="primary" :loading="savingServers" @click="saveServers">保存可见节点</Button>
         </div>
+      </template>
+      <template #footer>
+        <Button @click="linkVisible = false">关闭</Button>
       </template>
     </Drawer>
 
@@ -159,14 +186,6 @@
             label="新面板密码"
             placeholder="至少 6 位"
           />
-
-          <div class="field-wide">
-            <span class="lbl">订阅链接</span>
-            <div class="row" style="margin-top: 6px">
-              <Button small @click="resetSubToken">重置订阅链接</Button>
-              <span class="muted" style="font-size: 12.5px">立即生效，旧订阅链接失效，需重新分发</span>
-            </div>
-          </div>
         </div>
       </template>
       <template #footer>
@@ -205,7 +224,7 @@ import QrCode from '@/component/widget/QrCode.vue'
 import RuleScopePanel from '@/component/widget/RuleScopePanel.vue'
 import { del as httpDel, get, post, put } from '@/util/request'
 import { confirmDialog } from '@/util/confirm'
-import { fmtBytes } from '@/util/format'
+import { fmtBytes, fmtTime } from '@/util/format'
 import { toast } from '@/util/toast'
 import type { NodeInfo, RoutesData, ServerItem, SubUrls, UserInfo } from '@/types'
 
@@ -245,6 +264,10 @@ const userFinal = ref('')
 const ufOutbound = ref('direct')
 const ufSaving = ref(false)
 
+const renewVisible = ref(false)
+const renewing = ref(false)
+const renewDays = ref(30)
+
 const serverOptions = computed(() => servers.value.map((s) => ({ label: s.name, value: s.sid })))
 
 const outboundOptions = computed(() => [
@@ -265,6 +288,23 @@ const subEntries = computed(() => {
   return u.sub_url ? [{ key: 'default', label: '通用', url: u.sub_url }] : []
 })
 
+const currentLinks = computed(() => {
+  const u = current.value
+  if (!u) return [] as string[]
+  if (u.links?.length) return u.links
+  return u.link ? [u.link] : []
+})
+
+function linkName(link: string, i: number): string {
+  const h = link.split('#')[1]
+  if (!h) return `链接 ${i + 1}`
+  try {
+    return decodeURIComponent(h)
+  } catch {
+    return h
+  }
+}
+
 const panelModeOptions = [
   { label: '保持不变', value: 'keep' },
   { label: '设置新密码', value: 'set' },
@@ -281,24 +321,38 @@ const editForm = reactive({
   panel_password: '',
 })
 
-const renewVisible = ref(false)
-const renewing = ref(false)
-const renewDays = ref(30)
-
 function usedBytes(u: UserInfo): number {
   return (u.traffic?.up || 0) + (u.traffic?.down || 0)
 }
 
+function isExpired(u: UserInfo): boolean {
+  return !!u.expire_at && u.expire_at * 1000 < Date.now()
+}
+
 function trafficOver(u: UserInfo): boolean {
-  if (u.expire_at && u.expire_at * 1000 < Date.now()) return true
+  if (isExpired(u)) return true
   const lim = u.traffic_limit || 0
   return lim > 0 && usedBytes(u) >= lim
+}
+
+function usePct(u: UserInfo): number {
+  const lim = u.traffic_limit || 0
+  if (!lim) return 0
+  return Math.min(100, Math.round((usedBytes(u) / lim) * 100))
+}
+
+function useCls(u: UserInfo): string {
+  if (trafficOver(u)) return 'r'
+  const p = usePct(u)
+  if (p > 85) return 'r'
+  if (p >= 60) return 'y'
+  return ''
 }
 
 function userStatus(u: UserInfo): { color: 'green' | 'red' | 'dim'; text: string } {
   if (!u.enable) return { color: 'dim', text: '禁用' }
   if (u.active === false) {
-    if (u.expire_at && u.expire_at * 1000 < Date.now()) return { color: 'red', text: '已过期' }
+    if (isExpired(u)) return { color: 'red', text: '已过期' }
     return { color: 'red', text: '已超额' }
   }
   return { color: 'green', text: '正常' }
@@ -570,6 +624,25 @@ onMounted(load)
 </script>
 
 <style scoped>
+.use {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.use .meter {
+  width: 100%;
+}
+
+.use-txt {
+  font-size: 11.5px;
+}
+
+.over-red {
+  color: var(--c-red);
+  font-weight: 600;
+}
+
 .eye {
   background: none;
   border: none;
@@ -598,6 +671,19 @@ onMounted(load)
   align-items: flex-end;
   gap: 14px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.link-item + .link-item {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--c-border);
+}
+
+.link-name {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--c-text-dim);
 }
 
 .sub-line {
@@ -625,16 +711,6 @@ onMounted(load)
 .hint {
   margin: 12px 0 0;
   font-size: 12.5px;
-}
-
-.over-red {
-  color: var(--c-red);
-  font-weight: 600;
-}
-
-.lbl {
-  font-size: 12.5px;
-  color: var(--c-text-dim);
 }
 
 .field-wide {

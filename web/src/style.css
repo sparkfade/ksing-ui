@@ -1,80 +1,105 @@
+/* ── ksing-ui 设计系统 ─────────────────────────────
+   CSS 变量双主题：:root = 暗色(默认), [data-theme='light'] = 亮色 */
+
 :root {
+  /* 品牌 */
   --c-primary: #4cc2ff;
-  --c-primary-dark: #2a9fd8;
-  --c-on-primary: #08131b;
-  --c-bg: #0f1115;
-  --c-card: #171a21;
-  --c-card-2: #1c202a;
-  --c-border: #262b36;
-  --c-text: #e2e6ee;
-  --c-text-dim: #8a93a6;
+  --c-primary-strong: #2aabee;
+  --c-on-primary: #07131d;
+
+  /* 表面层级 */
+  --c-bg: #0b0e14;
+  --c-card: #131722;
+  --c-card-2: #1a2030;
+  --c-inset: #0d1119;
+  --c-border: #242c3d;
+  --c-border-strong: #323c52;
+
+  /* 文字 */
+  --c-text: #e6eaf3;
+  --c-text-dim: #8b94a9;
+  --c-text-faint: #5d6679;
+
+  /* 语义色 */
+  --c-green: #3ed598;
   --c-red: #ff6b6b;
-  --c-green: #43d9a3;
   --c-yellow: #f5c56b;
   --c-purple: #b48cff;
 
-  /* 语义软色（徽章/chip/提示条底与边） */
-  --c-primary-soft: rgba(76, 194, 255, 0.1);
-  --c-primary-bd: rgba(76, 194, 255, 0.25);
-  --c-green-soft: rgba(67, 217, 163, 0.1);
-  --c-green-bd: rgba(67, 217, 163, 0.25);
-  --c-red-soft: rgba(255, 107, 107, 0.1);
-  --c-red-bd: rgba(255, 107, 107, 0.3);
-  --c-yellow-soft: rgba(245, 197, 107, 0.08);
-  --c-yellow-bd: rgba(245, 197, 107, 0.3);
-  --c-purple-soft: rgba(180, 140, 255, 0.1);
-  --c-purple-bd: rgba(180, 140, 255, 0.25);
-  --c-dim-soft: rgba(138, 147, 166, 0.1);
+  /* 语义软色（徽章/chip 底与边） */
+  --c-primary-soft: rgba(76, 194, 255, 0.12);
+  --c-primary-bd: rgba(76, 194, 255, 0.28);
+  --c-green-soft: rgba(62, 213, 152, 0.12);
+  --c-green-bd: rgba(62, 213, 152, 0.28);
+  --c-red-soft: rgba(255, 107, 107, 0.12);
+  --c-red-bd: rgba(255, 107, 107, 0.32);
+  --c-yellow-soft: rgba(245, 197, 107, 0.1);
+  --c-yellow-bd: rgba(245, 197, 107, 0.32);
+  --c-purple-soft: rgba(180, 140, 255, 0.12);
+  --c-purple-bd: rgba(180, 140, 255, 0.28);
+  --c-dim-soft: rgba(139, 148, 169, 0.12);
 
-  --c-hover: rgba(255, 255, 255, 0.03);
-  --c-hover-2: rgba(255, 255, 255, 0.06);
-  --c-overlay: rgba(0, 0, 0, 0.55);
-  --c-glow: rgba(76, 194, 255, 0.06);
+  --c-hover: rgba(255, 255, 255, 0.035);
+  --c-hover-2: rgba(255, 255, 255, 0.07);
+  --c-overlay: rgba(4, 7, 12, 0.6);
+  --c-glow: rgba(76, 194, 255, 0.07);
 
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 10px rgba(0, 0, 0, 0.16);
-  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
-  --shadow-btn: 0 3px 12px rgba(76, 194, 255, 0.28);
+  /* 阴影 */
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.025) inset, 0 8px 24px rgba(0, 0, 0, 0.22);
+  --shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --shadow-btn: 0 4px 14px rgba(76, 194, 255, 0.3);
 
-  --radius: 10px;
+  /* 圆角阶梯 */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+
   --font: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
   --mono: 'SF Mono', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 [data-theme='light'] {
-  --c-primary: #1f9de8;
-  --c-primary-dark: #1580c0;
+  --c-primary: #1899e0;
+  --c-primary-strong: #0f85c4;
   --c-on-primary: #ffffff;
-  --c-bg: #f6f7f9;
+
+  --c-bg: #f2f4f8;
   --c-card: #ffffff;
-  --c-card-2: #eef1f5;
-  --c-border: #e3e7ee;
-  --c-text: #2a303c;
-  --c-text-dim: #6b7383;
+  --c-card-2: #eef1f6;
+  --c-inset: #f6f8fb;
+  --c-border: #e2e7f0;
+  --c-border-strong: #cdd5e1;
+
+  --c-text: #232a36;
+  --c-text-dim: #67707f;
+  --c-text-faint: #9aa3b2;
+
+  --c-green: #18a06c;
   --c-red: #e05260;
-  --c-green: #22a67c;
   --c-yellow: #c98d1e;
   --c-purple: #8a63e8;
 
-  --c-primary-soft: rgba(31, 157, 232, 0.1);
-  --c-primary-bd: rgba(31, 157, 232, 0.3);
-  --c-green-soft: rgba(34, 166, 124, 0.1);
-  --c-green-bd: rgba(34, 166, 124, 0.3);
-  --c-red-soft: rgba(224, 82, 96, 0.08);
+  --c-primary-soft: rgba(24, 153, 224, 0.1);
+  --c-primary-bd: rgba(24, 153, 224, 0.3);
+  --c-green-soft: rgba(24, 160, 108, 0.1);
+  --c-green-bd: rgba(24, 160, 108, 0.3);
+  --c-red-soft: rgba(224, 82, 96, 0.09);
   --c-red-bd: rgba(224, 82, 96, 0.3);
   --c-yellow-soft: rgba(201, 141, 30, 0.1);
   --c-yellow-bd: rgba(201, 141, 30, 0.35);
   --c-purple-soft: rgba(138, 99, 232, 0.1);
   --c-purple-bd: rgba(138, 99, 232, 0.3);
-  --c-dim-soft: rgba(107, 115, 131, 0.12);
+  --c-dim-soft: rgba(103, 112, 127, 0.12);
 
-  --c-hover: rgba(30, 50, 80, 0.05);
-  --c-hover-2: rgba(30, 50, 80, 0.08);
-  --c-overlay: rgba(30, 40, 60, 0.45);
-  --c-glow: rgba(31, 157, 232, 0.08);
+  --c-hover: rgba(25, 45, 75, 0.05);
+  --c-hover-2: rgba(25, 45, 75, 0.08);
+  --c-overlay: rgba(25, 35, 55, 0.45);
+  --c-glow: rgba(24, 153, 224, 0.08);
 
-  --shadow-card: 0 1px 2px rgba(30, 50, 80, 0.05), 0 4px 16px rgba(30, 50, 80, 0.06);
-  --shadow-pop: 0 12px 40px rgba(30, 50, 80, 0.2);
-  --shadow-btn: 0 3px 12px rgba(31, 157, 232, 0.32);
+  --shadow-card: 0 1px 2px rgba(20, 35, 60, 0.05), 0 6px 20px rgba(20, 35, 60, 0.06);
+  --shadow-pop: 0 16px 48px rgba(20, 35, 60, 0.2);
+  --shadow-btn: 0 4px 14px rgba(24, 153, 224, 0.35);
 }
 
 * {
@@ -89,8 +114,8 @@ body {
   color: var(--c-text);
   font-family: var(--font);
   font-size: 14px;
-  line-height: 1.5;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  line-height: 1.55;
+  transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
 }
 
 a {
@@ -104,7 +129,7 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--c-border);
+  background: var(--c-border-strong);
   border-radius: 4px;
 }
 
@@ -112,15 +137,51 @@ a {
   background: transparent;
 }
 
-/* ── 通用卡片与排版 ─────────────────────────── */
+/* ── 页面骨架 ─────────────────────────────── */
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  animation: page-in 0.25s var(--ease);
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.page-head h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.page-sub {
+  margin: 0 0 18px;
+  color: var(--c-text-dim);
+  font-size: 13px;
+}
+
+/* ── 卡片 ────────────────────────────────── */
 
 .card {
   background: var(--c-card);
   border: 1px solid var(--c-border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  padding: 18px 20px;
   box-shadow: var(--shadow-card);
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
 }
 
 .card + .card {
@@ -136,13 +197,26 @@ a {
   gap: 8px;
 }
 
+.card-title .sub {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--c-text-dim);
+}
+
+/* ── 文字与布局工具 ────────────────────────── */
+
 .muted {
   color: var(--c-text-dim);
+}
+
+.faint {
+  color: var(--c-text-faint);
 }
 
 .mono {
   font-family: var(--mono);
   font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .row {
@@ -159,25 +233,12 @@ a {
   flex: 1;
 }
 
-.page-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.page-head h2 {
-  margin: 0;
-  font-size: 19px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-}
-
 /* ── 表格 ────────────────────────────────── */
 
 .table-wrap {
   overflow-x: auto;
+  margin: 0 -20px;
+  padding: 0 20px;
 }
 
 table.tbl {
@@ -188,19 +249,22 @@ table.tbl {
 .tbl th,
 .tbl td {
   text-align: left;
-  padding: 10px 12px;
+  padding: 11px 12px;
   border-bottom: 1px solid var(--c-border);
   white-space: nowrap;
+  vertical-align: middle;
 }
 
 .tbl th {
   color: var(--c-text-dim);
   font-weight: 500;
-  font-size: 12.5px;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  text-transform: none;
 }
 
 .tbl tbody tr {
-  transition: background-color 0.12s ease;
+  transition: background-color 0.12s var(--ease);
 }
 
 .tbl tbody tr:hover {
@@ -216,13 +280,13 @@ table.tbl {
   row-gap: 6px;
 }
 
-/* ── 信息行 ────────────────────────────────── */
+/* ── 信息行 ──────────────────────────────── */
 
 .kv {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 7px 0;
+  padding: 8px 0;
   border-bottom: 1px dashed var(--c-border);
 }
 
@@ -240,13 +304,13 @@ table.tbl {
   word-break: break-all;
 }
 
-/* ── chip ─────────────────────────────────── */
+/* ── chip / 徽章通用 ─────────────────────── */
 
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 9px;
+  padding: 2px 10px;
   border-radius: 20px;
   font-size: 12px;
   background: var(--c-primary-soft);
@@ -277,19 +341,77 @@ table.tbl {
   opacity: 1;
 }
 
-/* ── 表单网格 ────────────────────────────────── */
+/* ── 状态圆点 ─────────────────────────────── */
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-text-faint);
+  flex-shrink: 0;
+}
+
+.dot.on {
+  background: var(--c-green);
+  box-shadow: 0 0 6px var(--c-green);
+}
+
+/* ── 进度条 (用量/系统) ────────────────────── */
+
+.meter {
+  height: 8px;
+  border-radius: 5px;
+  background: var(--c-card-2);
+  overflow: hidden;
+}
+
+.meter > i {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  background: var(--c-primary);
+  transition: width 0.35s var(--ease);
+}
+
+.meter > i.g {
+  background: var(--c-green);
+}
+
+.meter > i.y {
+  background: var(--c-yellow);
+}
+
+.meter > i.r {
+  background: var(--c-red);
+}
+
+/* ── 表单网格 ─────────────────────────────── */
 
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px 16px;
+  gap: 14px 16px;
 }
 
 .tip-bar {
-  padding: 10px 14px;
-  border-radius: var(--radius);
+  padding: 11px 15px;
+  border-radius: var(--r-md);
   background: var(--c-yellow-soft);
   border: 1px solid var(--c-yellow-bd);
   color: var(--c-yellow);
   margin-bottom: 16px;
+  font-size: 13px;
+}
+
+@media (max-width: 767px) {
+  .card {
+    padding: 15px 14px;
+    border-radius: var(--r-md);
+  }
+
+  .table-wrap {
+    margin: 0 -14px;
+    padding: 0 14px;
+  }
 }

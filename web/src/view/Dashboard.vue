@@ -1,88 +1,42 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>仪表盘</h2>
       <div class="spacer"></div>
       <Button small @click="loadAll" :loading="loading">刷新</Button>
     </div>
-
-    <p class="muted" style="margin: -6px 0 14px; font-size: 12.5px">
-      配置变更实时（秒级）自动下发到各服务器节点并生效，无需手动应用。
-    </p>
+    <p class="page-sub">配置变更实时（秒级）自动下发到各服务器节点并生效，无需手动应用。</p>
 
     <Spinner v-if="loading && !st" />
 
     <template v-else-if="st">
-      <!-- 统计卡片行 -->
+      <!-- 概览统计 -->
       <div class="stat-grid">
+        <div class="card stat">
+          <span class="stat-label">在线节点</span>
+          <span class="stat-num">
+            {{ st.counts.servers_online }}<small class="muted stat-sub"> / {{ st.counts.servers }}</small>
+          </span>
+          <span class="stat-foot muted">服务器节点</span>
+        </div>
         <div class="card stat">
           <span class="stat-label">用户数</span>
           <span class="stat-num">{{ st.counts.users }}</span>
+          <span class="stat-foot muted">规则 {{ st.counts.rules }} · 规则集 {{ st.counts.rulesets }}</span>
         </div>
         <div class="card stat">
-          <span class="stat-label">服务器节点</span>
-          <span class="stat-num">
-            {{ st.counts.servers_online }}<small class="muted stat-sub">/{{ st.counts.servers }} 在线</small>
+          <span class="stat-label">总流量</span>
+          <span class="stat-num">{{ fmtBytes(totalUp + totalDown) }}</span>
+          <span class="stat-foot muted">↑ {{ fmtBytes(totalUp) }} · ↓ {{ fmtBytes(totalDown) }}</span>
+        </div>
+        <div class="card stat">
+          <span class="stat-label">实时速率<span class="live-dot" title="每 2 秒刷新"></span></span>
+          <span class="stat-num rate">
+            <b class="arr up">↑</b>{{ fmtBytes(rates?.total.rate_up) }}/s
           </span>
-        </div>
-        <div class="card stat">
-          <span class="stat-label">规则数</span>
-          <span class="stat-num">{{ st.counts.rules }}</span>
-        </div>
-        <div class="card stat">
-          <span class="stat-label">规则集数</span>
-          <span class="stat-num">{{ st.counts.rulesets }}</span>
-        </div>
-      </div>
-
-      <!-- 实时带宽 + 系统状态 -->
-      <div class="grid2">
-        <div class="card">
-          <h3 class="card-title">实时带宽<span class="live-dot" title="每 3 秒刷新"></span></h3>
-          <div class="rates">
-            <div class="rate-item">
-              <span class="tf-k"><b class="arr up">↑</b> 上行速率</span>
-              <span class="rate-v mono up">{{ fmtBytes(rates?.total.rate_up) }}/s</span>
-            </div>
-            <div class="rate-item">
-              <span class="tf-k"><b class="arr down">↓</b> 下行速率</span>
-              <span class="rate-v mono down">{{ fmtBytes(rates?.total.rate_down) }}/s</span>
-            </div>
-          </div>
-          <div v-if="serverRates.length" class="srv-rates">
-            <div v-for="r in serverRates" :key="r.sid" class="srv-rate">
-              <span class="muted">{{ r.name }}</span>
-              <span class="mono">↑{{ fmtBytes(r.rate_up) }}/s ↓{{ fmtBytes(r.rate_down) }}/s</span>
-            </div>
-          </div>
-          <div class="tflow-total muted">
-            总流量 ↑ {{ fmtBytes(totalUp) }} ↓ {{ fmtBytes(totalDown) }} · 合计 {{ fmtBytes(totalUp + totalDown) }}
-          </div>
-        </div>
-
-        <div class="card">
-          <h3 class="card-title">系统状态</h3>
-          <template v-if="sys">
-            <div class="sys-row">
-              <span class="sys-label">CPU</span>
-              <div class="bar"><i :class="lvlClass(sys.cpu)" :style="{ width: clampPct(sys.cpu) + '%' }"></i></div>
-              <span class="sys-val mono">{{ sys.cpu.toFixed(0) }}%</span>
-            </div>
-            <div class="sys-row">
-              <span class="sys-label">内存</span>
-              <div class="bar"><i :class="lvlClass(sys.mem.percent)" :style="{ width: clampPct(sys.mem.percent) + '%' }"></i></div>
-              <span class="sys-val mono">{{ fmtBytes(sys.mem.used) }}/{{ fmtBytes(sys.mem.total) }}</span>
-            </div>
-            <div class="sys-row">
-              <span class="sys-label">磁盘</span>
-              <div class="bar"><i :class="lvlClass(sys.disk.percent)" :style="{ width: clampPct(sys.disk.percent) + '%' }"></i></div>
-              <span class="sys-val mono">{{ fmtBytes(sys.disk.used) }}/{{ fmtBytes(sys.disk.total) }}</span>
-            </div>
-            <div class="sys-foot muted">
-              负载 {{ sys.load.map((n) => n.toFixed(2)).join(' ') }} · 运行时间 {{ fmtUptime(sys.uptime) }}
-            </div>
-          </template>
-          <Empty v-else text="加载中…" />
+          <span class="stat-foot muted">
+            <b class="arr down">↓</b> {{ fmtBytes(rates?.total.rate_down) }}/s
+          </span>
         </div>
       </div>
 
@@ -91,36 +45,73 @@
         <div class="card">
           <h3 class="card-title">
             节点列表
+            <span class="sub">{{ servers.length }} 个</span>
             <div class="spacer"></div>
             <router-link to="/servers" class="more">管理 →</router-link>
           </h3>
-          <Empty v-if="!servers.length" text="暂无服务器节点" />
+          <Empty v-if="!servers.length" text="暂无服务器节点">
+            <Button small variant="primary" @click="router.push('/servers')">去添加</Button>
+          </Empty>
           <div v-else class="srv-list">
             <div v-for="s in servers" :key="s.sid" class="srv-row" @click="router.push('/servers')">
               <span class="dot" :class="{ on: s.online }"></span>
-              <span class="srv-name">{{ s.name }}</span>
-              <Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge>
-              <span class="mono muted srv-tr">↑{{ fmtBytes(s.traffic?.up) }} ↓{{ fmtBytes(s.traffic?.down) }}</span>
-              <span class="muted srv-seen">{{ fmtAgo(s.last_seen) }}</span>
+              <div class="srv-main">
+                <div class="srv-line1">
+                  <span class="srv-name">{{ s.name }}</span>
+                  <Badge v-if="s.sb_running === true" color="green">核心运行中</Badge>
+                  <Badge v-else-if="s.sb_running === false" color="red">核心停止</Badge>
+                  <Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge>
+                </div>
+                <div class="srv-line2 mono muted">
+                  {{ s.cert_mode === 'acme' ? s.domain : s.reported_ip || '待上报' }}:{{ s.port }}
+                </div>
+              </div>
+              <div class="srv-nums">
+                <span class="mono srv-rate">
+                  <b class="arr up">↑</b>{{ fmtBytes(rateOf(s.sid)?.rate_up) }}/s
+                  <b class="arr down">↓</b>{{ fmtBytes(rateOf(s.sid)?.rate_down) }}/s
+                </span>
+                <span class="mono muted">累计 {{ fmtBytes((s.traffic?.up || 0) + (s.traffic?.down || 0)) }}</span>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 流量排名 -->
+        <!-- 系统状态 -->
         <div class="card">
-          <h3 class="card-title">流量排名 · 用户</h3>
-          <Empty v-if="!userRank.length" text="暂无流量数据" />
-          <div v-for="r in userRank" :key="'u' + r.name" class="rank-row">
-            <span class="rank-name" :title="r.name">{{ r.name }}</span>
-            <div class="bar"><i :style="{ width: r.pct + '%' }"></i></div>
-            <span class="mono rank-val">{{ fmtBytes(r.total) }}</span>
-          </div>
+          <h3 class="card-title">系统状态<span class="sub">面板主机</span></h3>
+          <template v-if="sys">
+            <div class="sys-row">
+              <span class="sys-label">CPU</span>
+              <div class="meter"><i :class="lvlClass(sys.cpu)" :style="{ width: clampPct(sys.cpu) + '%' }"></i></div>
+              <span class="sys-val mono">{{ sys.cpu.toFixed(0) }}%</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label">内存</span>
+              <div class="meter"><i :class="lvlClass(sys.mem.percent)" :style="{ width: clampPct(sys.mem.percent) + '%' }"></i></div>
+              <span class="sys-val mono">{{ fmtBytes(sys.mem.used) }}/{{ fmtBytes(sys.mem.total) }}</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-label">磁盘</span>
+              <div class="meter"><i :class="lvlClass(sys.disk.percent)" :style="{ width: clampPct(sys.disk.percent) + '%' }"></i></div>
+              <span class="sys-val mono">{{ fmtBytes(sys.disk.used) }}/{{ fmtBytes(sys.disk.total) }}</span>
+            </div>
+            <div class="sys-foot muted">
+              负载 {{ sys.load.map((n) => n.toFixed(2)).join(' · ') }}　|　运行时间 {{ fmtUptime(sys.uptime) }}
+            </div>
+          </template>
+          <Empty v-else text="加载中…" />
+        </div>
+      </div>
 
-          <h3 class="card-title" style="margin-top: 20px">流量排名 · 节点</h3>
-          <Empty v-if="!serverRank.length" text="暂无流量数据" />
-          <div v-for="r in serverRank" :key="'s' + r.name" class="rank-row">
+      <!-- 流量排名 -->
+      <div class="card">
+        <h3 class="card-title">流量排名<span class="sub">用户 Top10</span></h3>
+        <Empty v-if="!userRank.length" text="暂无流量数据" />
+        <div v-else class="rank-grid">
+          <div v-for="r in userRank" :key="r.name" class="rank-row">
             <span class="rank-name" :title="r.name">{{ r.name }}</span>
-            <div class="bar"><i class="alt" :style="{ width: r.pct + '%' }"></i></div>
+            <div class="meter"><i :style="{ width: r.pct + '%' }"></i></div>
             <span class="mono rank-val">{{ fmtBytes(r.total) }}</span>
           </div>
         </div>
@@ -138,8 +129,8 @@ import Empty from '@/component/ui/Empty.vue'
 import Spinner from '@/component/ui/Spinner.vue'
 import { get } from '@/util/request'
 import { toast } from '@/util/toast'
-import { fmtAgo, fmtBytes } from '@/util/format'
-import type { ServerItem, StatusData, SystemInfo, TrafficData } from '@/types'
+import { fmtBytes } from '@/util/format'
+import type { RateStat, ServerItem, StatusData, SystemInfo, TrafficData } from '@/types'
 
 const router = useRouter()
 const st = ref<StatusData>()
@@ -147,42 +138,25 @@ const servers = ref<ServerItem[]>([])
 const traffic = ref<TrafficData>({ users: {}, servers: {} })
 const sys = ref<SystemInfo>()
 const loading = ref(false)
-let pollTimer: ReturnType<typeof setInterval> | undefined
+let fastTimer: ReturnType<typeof setInterval> | undefined
+let slowTimer: ReturnType<typeof setInterval> | undefined
 
 const rates = computed(() => traffic.value.rates)
-
-const serverRates = computed(() =>
-  servers.value.map((s) => ({
-    sid: s.sid,
-    name: s.name,
-    rate_up: traffic.value.rates?.servers?.[s.sid]?.rate_up || 0,
-    rate_down: traffic.value.rates?.servers?.[s.sid]?.rate_down || 0,
-  })),
-)
-
 const totalUp = computed(() => Object.values(traffic.value.users).reduce((a, t) => a + (t?.up || 0), 0))
 const totalDown = computed(() => Object.values(traffic.value.users).reduce((a, t) => a + (t?.down || 0), 0))
 
-function rankOf(entries: Array<[string, number]>, names?: Record<string, string>) {
-  const arr = entries
-    .map(([key, total]) => ({ name: names?.[key] ?? key, total }))
+function rateOf(sid: string): RateStat | undefined {
+  return traffic.value.rates?.servers?.[sid]
+}
+
+const userRank = computed(() => {
+  const arr = Object.entries(traffic.value.users)
+    .map(([name, t]) => ({ name, total: (t?.up || 0) + (t?.down || 0) }))
     .filter((x) => x.total > 0)
     .sort((a, b) => b.total - a.total)
     .slice(0, 10)
   const max = arr[0]?.total || 1
   return arr.map((x) => ({ ...x, pct: Math.max(3, Math.round((x.total / max) * 100)) }))
-}
-
-const userRank = computed(() =>
-  rankOf(Object.entries(traffic.value.users).map(([name, t]) => [name, (t?.up || 0) + (t?.down || 0)])),
-)
-
-const serverRank = computed(() => {
-  const names = Object.fromEntries(servers.value.map((s) => [s.sid, s.name]))
-  return rankOf(
-    Object.entries(traffic.value.servers).map(([sid, t]) => [sid, (t?.up || 0) + (t?.down || 0)]),
-    names,
-  )
 })
 
 async function loadAll() {
@@ -203,17 +177,25 @@ async function loadAll() {
   }
 }
 
-async function poll() {
+async function pollFast() {
   if (document.hidden) return
   try {
-    const [tf, si] = await Promise.all([
-      get<TrafficData>('/api/traffic'),
-      get<SystemInfo>('/api/system'),
-    ])
+    const [tf, si] = await Promise.all([get<TrafficData>('/api/traffic'), get<SystemInfo>('/api/system')])
     traffic.value = tf
     sys.value = si
   } catch {
     /* 轮询失败静默，401 已由 request 处理 */
+  }
+}
+
+async function pollSlow() {
+  if (document.hidden) return
+  try {
+    const [s, sv] = await Promise.all([get<StatusData>('/api/status'), get<ServerItem[]>('/api/servers')])
+    st.value = s
+    servers.value = sv
+  } catch {
+    /* 同上 */
   }
 }
 
@@ -222,9 +204,9 @@ function clampPct(n: number): number {
 }
 
 function lvlClass(pct: number): string {
-  if (pct > 85) return 'lvl-red'
-  if (pct >= 60) return 'lvl-yellow'
-  return 'lvl-green'
+  if (pct > 85) return 'r'
+  if (pct >= 60) return 'y'
+  return 'g'
 }
 
 function fmtUptime(sec: number): string {
@@ -239,17 +221,21 @@ function fmtUptime(sec: number): string {
 
 onMounted(() => {
   loadAll()
-  poll()
-  pollTimer = setInterval(poll, 3000)
+  pollFast()
+  fastTimer = setInterval(pollFast, 2000)
+  slowTimer = setInterval(pollSlow, 20000)
 })
 
-onUnmounted(() => clearInterval(pollTimer))
+onUnmounted(() => {
+  clearInterval(fastTimer)
+  clearInterval(slowTimer)
+})
 </script>
 
 <style scoped>
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 16px;
 }
@@ -257,64 +243,41 @@ onUnmounted(() => clearInterval(pollTimer))
 .stat {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   padding: 16px 18px;
 }
 
 .stat-label {
   font-size: 12.5px;
   color: var(--c-text-dim);
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .stat-num {
-  font-size: 26px;
+  font-size: 25px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-num.rate {
+  font-size: 21px;
 }
 
 .stat-sub {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 400;
 }
 
-.rates {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.rate-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
-  border: 1px dashed var(--c-border);
-  border-radius: 8px;
-}
-
-.tf-k {
-  font-size: 12.5px;
-  color: var(--c-text-dim);
-}
-
-.rate-v {
-  font-size: 22px;
-  font-weight: 700;
-}
-
-.rate-v.up,
-.arr.up {
-  color: var(--c-green);
-}
-
-.rate-v.down,
-.arr.down {
-  color: var(--c-primary);
+.stat-foot {
+  font-size: 12px;
 }
 
 .live-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--c-green);
   box-shadow: 0 0 6px var(--c-green);
@@ -327,72 +290,23 @@ onUnmounted(() => clearInterval(pollTimer))
   }
 }
 
-.srv-rates {
-  margin-top: 12px;
-  border-top: 1px dashed var(--c-border);
-  padding-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+.arr {
+  font-weight: 700;
 }
 
-.srv-rate {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12px;
+.arr.up {
+  color: var(--c-green);
 }
 
-.tflow-total {
-  margin-top: 10px;
-  font-size: 12.5px;
-}
-
-.sys-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 0;
-}
-
-.sys-label {
-  width: 36px;
-  flex-shrink: 0;
-  font-size: 13px;
-  color: var(--c-text-dim);
-}
-
-.sys-val {
-  width: 118px;
-  text-align: right;
-  flex-shrink: 0;
-  font-size: 12px;
-}
-
-.sys-foot {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--c-border);
-  font-size: 12.5px;
-}
-
-.bar i.lvl-green {
-  background: var(--c-green);
-}
-
-.bar i.lvl-yellow {
-  background: var(--c-yellow);
-}
-
-.bar i.lvl-red {
-  background: var(--c-red);
+.arr.down {
+  color: var(--c-primary);
 }
 
 .grid2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
   gap: 16px;
-  margin-top: 16px;
+  margin-bottom: 16px;
 }
 
 .more {
@@ -408,12 +322,12 @@ onUnmounted(() => clearInterval(pollTimer))
 .srv-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 8px;
-  border-radius: 8px;
+  gap: 12px;
+  padding: 10px 10px;
+  border-radius: 10px;
   border-bottom: 1px dashed var(--c-border);
   cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition: background-color 0.12s var(--ease);
 }
 
 .srv-row:last-child {
@@ -424,44 +338,83 @@ onUnmounted(() => clearInterval(pollTimer))
   background: var(--c-hover);
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--c-text-dim);
-  flex-shrink: 0;
+.srv-main {
+  min-width: 0;
+  flex: 1;
 }
 
-.dot.on {
-  background: var(--c-green);
-  box-shadow: 0 0 5px var(--c-green);
+.srv-line1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .srv-name {
   font-weight: 600;
   font-size: 13.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.srv-tr {
-  margin-left: auto;
+.srv-line2 {
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.srv-nums {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.srv-rate {
   font-size: 12px;
 }
 
-.srv-seen {
-  font-size: 12px;
-  width: 74px;
+.sys-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.sys-label {
+  width: 36px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--c-text-dim);
+}
+
+.sys-row .meter {
+  flex: 1;
+}
+
+.sys-val {
+  width: 118px;
   text-align: right;
   flex-shrink: 0;
+  font-size: 12px;
+}
+
+.sys-foot {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--c-border);
+  font-size: 12.5px;
+}
+
+.rank-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 4px 24px;
 }
 
 .rank-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 0;
+  padding: 5px 0;
 }
 
 .rank-name {
@@ -473,24 +426,8 @@ onUnmounted(() => clearInterval(pollTimer))
   white-space: nowrap;
 }
 
-.bar {
+.rank-row .meter {
   flex: 1;
-  height: 8px;
-  border-radius: 5px;
-  background: var(--c-card-2);
-  overflow: hidden;
-}
-
-.bar i {
-  display: block;
-  height: 100%;
-  border-radius: 5px;
-  background: var(--c-primary);
-  transition: width 0.3s ease;
-}
-
-.bar i.alt {
-  background: var(--c-green);
 }
 
 .rank-val {
@@ -505,8 +442,8 @@ onUnmounted(() => clearInterval(pollTimer))
     grid-template-columns: 1fr;
   }
 
-  .srv-seen {
-    display: none;
+  .srv-nums {
+    align-items: flex-end;
   }
 }
 </style>

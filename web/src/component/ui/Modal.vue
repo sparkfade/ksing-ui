@@ -1,19 +1,21 @@
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="overlay" @click.self="close">
-      <div class="modal">
-        <div class="head">
-          <h3>{{ title }}</h3>
-          <button class="x" @click="close">×</button>
-        </div>
-        <div class="body">
-          <slot />
-        </div>
-        <div v-if="$slots.footer" class="foot">
-          <slot name="footer" />
+    <Transition name="pop">
+      <div v-if="visible" class="overlay" @click.self="close">
+        <div class="modal">
+          <div class="head">
+            <h3>{{ title }}</h3>
+            <button class="x" @click="close">×</button>
+          </div>
+          <div class="body">
+            <slot />
+          </div>
+          <div v-if="$slots.footer" class="foot">
+            <slot name="footer" />
+          </div>
         </div>
       </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -31,6 +33,7 @@ function close() {
   position: fixed;
   inset: 0;
   background: var(--c-overlay);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -40,9 +43,9 @@ function close() {
 
 .modal {
   background: var(--c-card);
-  border: 1px solid var(--c-border);
-  border-radius: 12px;
-  width: 480px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-lg);
+  width: 520px;
   max-width: 100%;
   max-height: 85vh;
   display: flex;
@@ -54,13 +57,14 @@ function close() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--c-border);
 }
 
 .head h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 15.5px;
+  font-weight: 600;
 }
 
 .x {
@@ -70,8 +74,9 @@ function close() {
   font-size: 20px;
   cursor: pointer;
   line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: all 0.15s var(--ease);
 }
 
 .x:hover {
@@ -80,15 +85,38 @@ function close() {
 }
 
 .body {
-  padding: 16px 18px;
+  padding: 18px 20px;
   overflow-y: auto;
 }
 
 .foot {
-  padding: 12px 18px;
+  padding: 14px 20px;
   border-top: 1px solid var(--c-border);
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.pop-enter-active,
+.pop-leave-active {
+  transition: opacity 0.18s var(--ease);
+}
+
+.pop-enter-active .modal,
+.pop-leave-active .modal {
+  transition: transform 0.18s var(--ease), opacity 0.18s var(--ease);
+}
+
+.pop-enter-from,
+.pop-leave-to {
+  opacity: 0;
+}
+
+.pop-enter-from .modal {
+  transform: translateY(14px) scale(0.98);
+}
+
+.pop-leave-to .modal {
+  transform: translateY(8px) scale(0.98);
 }
 </style>

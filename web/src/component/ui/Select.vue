@@ -41,28 +41,41 @@ const normalized = computed(() =>
 .label {
   font-size: 12.5px;
   color: var(--c-text-dim);
+  font-weight: 500;
 }
 
 .hint {
   font-style: normal;
   margin-left: 6px;
   opacity: 0.75;
+  font-weight: 400;
 }
 
 .ctrl {
   width: 100%;
-  padding: 8px 11px;
-  border-radius: 6px;
+  padding: 9px 12px;
+  border-radius: 10px;
   border: 1px solid var(--c-border);
-  background: var(--c-bg);
+  background: var(--c-inset);
   color: var(--c-text);
   font-size: 13.5px;
   font-family: var(--font);
   outline: none;
   cursor: pointer;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.ctrl:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
 }
 
 .ctrl:focus {
   border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
+}
+
+.ctrl:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

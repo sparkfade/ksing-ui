@@ -5,7 +5,7 @@
         <svg viewBox="0 0 24 24" width="20" height="20">
           <path fill="var(--c-primary)" d="M13.6 3.5 5.5 13.6h5.2l-1.3 6.9 8.1-10.1h-5.2l1.3-6.9z" />
         </svg>
-        <span>KSING-UI</span>
+        <span>ksing-ui</span>
       </div>
       <div class="spacer"></div>
       <ThemeToggle />
@@ -50,7 +50,7 @@ function doLogout() {
   position: sticky;
   top: 0;
   z-index: 10;
-  transition: background-color 0.2s ease, border-color 0.2s ease;
+  transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
 }
 
 .logo {
@@ -59,7 +59,7 @@ function doLogout() {
   gap: 8px;
   font-size: 16px;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.6px;
 }
 
 .spacer {
@@ -74,9 +74,9 @@ function doLogout() {
 .umain {
   flex: 1;
   width: 100%;
-  max-width: 760px;
+  max-width: 780px;
   margin: 0 auto;
-  padding: 24px 18px 48px;
+  padding: 24px 18px 56px;
 }
 
 @media (max-width: 767px) {
@@ -89,7 +89,7 @@ function doLogout() {
   }
 
   .umain {
-    padding: 16px 12px 48px;
+    padding: 16px 12px 56px;
   }
 }
 </style>

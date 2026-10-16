@@ -1,18 +1,22 @@
 <template>
-  <div>
+  <div class="page">
     <div class="page-head">
       <h2>设置</h2>
+      <div class="spacer"></div>
+      <Button small @click="load" :loading="loading">重置</Button>
+      <Button variant="primary" :loading="saving" :disabled="loading" @click="save">保存设置</Button>
     </div>
+    <p class="page-sub">设置变更保存后自动下发到相关节点；面板监听与端口修改需重启面板进程生效。</p>
 
     <Spinner v-if="loading" />
 
     <template v-else>
       <div class="card">
-        <h3 class="card-title">服务器设置</h3>
+        <h3 class="card-title">代理服务</h3>
         <div class="form-grid">
-          <Input v-model="form.sni" label="自签伪装 SNI (可选)" hint="仅自签/IP 证书模式的节点使用, 域名证书节点的 SNI 就是其域名" placeholder="www.apple.com" />
+          <Input v-model="form.sni" label="全局 SNI (可选)" hint="仅自签 / IP 证书模式的节点使用；域名证书节点的 SNI 即其域名" placeholder="www.apple.com" />
           <Select v-model="form.final" label="默认出站" hint="分流规则未命中时使用的出站" :options="finalOptions" />
-          <Select v-model="form.private_action" label="私网地址处理" hint="命中私网地址的目标如何处理" :options="[
+          <Select v-model="form.private_action" label="私网地址处理" hint="目标为私网地址时如何处理" :options="[
             { label: 'reject 拒绝', value: 'reject' },
             { label: 'direct 直连', value: 'direct' },
             { label: 'off 不处理', value: 'off' },
@@ -21,37 +25,38 @@
           <div class="field-row">
             <Toggle v-model="form.auto_detect_interface" label="自动检测出口网卡" />
           </div>
-          <Input v-model="form.panel_listen" label="面板监听地址" placeholder=":: / 127.0.0.1" />
-          <Input v-model.number="form.panel_port" label="面板端口" hint="修改后需重启面板进程生效" type="number" />
         </div>
-        <div class="row" style="margin-top: 18px; justify-content: flex-end">
-          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">面板服务</h3>
+        <div class="form-grid">
+          <Input v-model="form.panel_listen" label="监听地址" hint=":: 全地址 / 127.0.0.1 仅本机" placeholder=":: / 127.0.0.1" />
+          <Input v-model.number="form.panel_port" label="面板端口" hint="修改后需重启面板进程生效" type="number" placeholder="8080" />
         </div>
       </div>
 
       <div class="card">
         <h3 class="card-title">订阅发布</h3>
         <div class="form-grid">
-          <Input v-model="form.sub_host" label="订阅主机 (域名/IP)" hint="留空则跟随浏览器访问地址 (反代友好); 可带端口如 sub.example.com:8443" placeholder="sub.example.com:8443" />
-          <Input v-model="form.sub_path" label="订阅路径" hint="默认 sub" placeholder="sub" />
-          <Input v-model.number="form.sub_port" label="订阅端口" hint="0 = 跟随订阅地址或请求端口; 反代到 443 之类场景填 443" type="number" placeholder="0" />
+          <Input v-model="form.sub_host" label="订阅主机 (域名/IP)" hint="留空则跟随浏览器访问地址 (反代友好)；可带端口，如 sub.example.com:8443" placeholder="sub.example.com:8443" />
+          <Input v-model.number="form.sub_port" label="订阅端口" hint="0 = 跟随订阅地址或请求端口；反代到 443 等场景填 443" type="number" placeholder="0" />
+          <Input v-model="form.sub_path" label="订阅路径" hint="默认 sub；修改后旧订阅地址立即失效" placeholder="sub" />
         </div>
-        <p class="muted" style="margin: 12px 0 0; font-size: 12.5px">
-          修改路径后旧订阅地址立即失效；配合用户页的重置订阅可快速换发。
+        <p class="card-note muted">
+          订阅地址泄露时可配合「我的-重置订阅链接」或用户页的「重置订阅」快速换发。
         </p>
-        <div class="row" style="margin-top: 18px; justify-content: flex-end">
-          <Button variant="primary" :loading="saving" @click="save">保存设置</Button>
-        </div>
       </div>
 
       <div class="card">
         <h3 class="card-title">管理员账号</h3>
         <div class="form-grid">
           <Input v-model="adminForm.old_password" label="原密码" type="password" placeholder="必填" />
-          <Input v-model="adminForm.new_username" label="新用户名" placeholder="留空则不修改" />
-          <Input v-model="adminForm.new_password" label="新密码" hint="至少 6 位" type="password" placeholder="留空则不修改" />
+          <Input v-model="adminForm.new_username" label="新用户名" hint="留空则不修改" :placeholder="adminUser" />
+          <Input v-model="adminForm.new_password" label="新密码" hint="至少 6 位，留空则不修改" type="password" placeholder="留空则不修改" />
         </div>
-        <div class="row" style="margin-top: 18px; justify-content: flex-end">
+        <div class="row foot">
+          <span class="muted note">修改后当前登录令牌自动更换，其他会话立即失效。</span>
           <Button variant="primary" :loading="savingAdmin" @click="saveAdmin">修改凭据</Button>
         </div>
       </div>
@@ -75,6 +80,7 @@ const loading = ref(true)
 const saving = ref(false)
 const savingAdmin = ref(false)
 const nodeTags = ref<string[]>([])
+const adminUser = ref('admin')
 
 const form = reactive({
   host: '',
@@ -109,8 +115,9 @@ async function load() {
       get<Settings>('/api/settings'),
       get<Record<string, NodeInfo>>('/api/nodes'),
     ])
+    const subHost = s.sub_host || s.host || ''
     Object.assign(form, {
-      host: s.host ?? '',
+      host: subHost,
       sni: s.sni ?? '',
       final: s.final || 'direct',
       private_action: s.private_action || 'reject',
@@ -118,10 +125,11 @@ async function load() {
       log_level: s.log_level || 'info',
       panel_listen: s.panel_listen ?? '',
       panel_port: s.panel_port,
-      sub_host: s.sub_host || s.host || '',
+      sub_host: subHost,
       sub_path: s.sub_path || 'sub',
       sub_port: s.sub_port ?? 0,
     })
+    adminUser.value = s.admin_user
     adminForm.new_username = s.admin_user
     nodeTags.value = Object.keys(nd).sort()
   } catch (e) {
@@ -184,5 +192,21 @@ onMounted(load)
   display: flex;
   align-items: flex-end;
   padding-bottom: 8px;
+}
+
+.card-note {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+}
+
+.foot {
+  margin-top: 16px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.foot .note {
+  font-size: 12.5px;
+  margin-right: auto;
 }
 </style>
