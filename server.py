@@ -1974,33 +1974,24 @@ def render_clash(nodes):
         "dns:",
         "  enable: true",
         "  listen: 127.0.0.1:1053",   # 仅本机监听 (0.0.0.0 会暴露到局域网)
-        "  enhanced-mode: fake-ip",  # fakeip 兜底: 域名先路由后解析, 不把域名泄露给本地 DNS
+        "  enhanced-mode: fake-ip",  # fakeip: 域名先路由后解析, 客户端拿到假 IP 不触发本地解析
         "  fake-ip-range: 198.18.0.1/16",
-        "  fake-ip-filter:",         # 国内域名不走 fakeip, 直接用国内 DNS 出真实 IP
-        "    - '*.lan'",            #   (rule-set 与规则同源, 经代理下载必有; geosite:cn 依赖
-        "    - '*.local'",          #    GitHub 直连下载的 geosite.dat, 国内常失败)
-        "    - 'localhost.*'",
-        "    - 'rule-set:cn-site'",
+        "  fake-ip-filter:",         # 仅本地域名走真实 IP; 其余 (含国内域名) 一律 fake-ip —
+        "    - '*.lan'",            #   解析时机推迟到出站: 直连出站用 direct-nameserver (国内),
+        "    - '*.local'",          #   代理出站由节点远端解析 — rule/global/direct 三种模式行为一致,
+        "    - 'localhost.*'",      #   全局模式不会残留任何国内 DNS 查询
         "  default-nameserver:",     # 仅用于解析下面的 DoH 服务器域名
         "    - 223.5.5.5",
         "    - 119.29.29.29",
-        "  nameserver:",             # 兜底解析走代理加密 DNS: 未分类域名 (dnsleak 测试的
-        "    - https://1.1.1.1/dns-query#节点选择",  # 随机子域等) 不得查到国内 DNS
+        "  nameserver:",             # 兜底解析走代理加密 DNS: IP 规则 (cn-ip) 匹配触发的解析、
+        "    - https://1.1.1.1/dns-query#节点选择",  # 未分类域名 (dnsleak 测试的随机子域等) 不得查到国内 DNS
         "    - https://8.8.8.8/dns-query#节点选择",
         "  proxy-server-nameserver:",  # 节点域名解析只用国内 DNS (代理未就绪时可用)
         "    - https://223.6.6.6/dns-query",
-        "  direct-nameserver:",      # 直连出站的解析走国内 DNS (等价 sing-box 直连用 local DNS;
-        "    - https://223.6.6.6/dns-query",  # 否则直连域名被兜底 nameserver 经代理解析, 代理一断国内就废)
+        "  direct-nameserver:",      # 直连出站 (DIRECT) 的域名解析走国内 DNS — 仅真正直连时使用,
+        "    - https://223.6.6.6/dns-query",  # 全局模式下无直连出站 → 零国内 DNS 查询
         "    - https://119.29.29.29/dns-query",
-        "  direct-nameserver-follow-policy: true",
         "  respect-rules: true",       # DNS 查询遵循路由规则 (#节点选择 后缀走代理)
-        "  nameserver-policy:",
-        "    'rule-set:cn-site':",
-        "      - https://223.6.6.6/dns-query",
-        "      - https://119.29.29.29/dns-query",
-        "    'rule-set:gfw-site':",
-        "      - https://1.1.1.1/dns-query#节点选择",
-        "      - https://8.8.8.8/dns-query#节点选择",
         "proxies:",
     ]
     for n in nodes:
