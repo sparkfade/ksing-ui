@@ -1941,7 +1941,9 @@ def sub_page(name, links, sub_url):
 # ------------------------------------------------------------------ 订阅格式渲染
 
 def render_clash(nodes):
-    """mihomo/Clash 订阅: 完整配置, fakeip + DNS 防泄露 + 国内直连/国外代理 (与服务端分流互不干扰)。
+    """mihomo/Clash 订阅: 完整配置, 与 sing-box 订阅等价的分流结构
+    (sniff 嗅探 → 内网直连 → 国内域名直连 → 国外域名代理 → 国内IP直连 → 兜底代理),
+    fakeip + DNS 防泄露 (未分类域名经代理解析, 直连解析走国内 DNS 不依赖代理)。
     规则集经代理下载 (proxy: 节点选择), 解决 GitHub 直连被墙导致规则下载失败、全部流量落 MATCH 的问题。"""
     lines = [
         "# ksing-ui 订阅 (mihomo)",
@@ -1950,6 +1952,17 @@ def render_clash(nodes):
         "mode: rule",
         "log-level: warning",
         "external-controller: 127.0.0.1:9090",
+        "sniffer:",                 # 等价 sing-box 的 sniff: 从 TLS/HTTP/QUIC 嗅探域名
+        "  enable: true",           #   国内域名走 fake-ip-filter 出真实 IP, 客户端按 IP 连接,
+        "  parse-pure-ip: true",    #   无域名可匹配域名规则 → 嗅探 SNI/Host 恢复域名后再分流
+        "  override-destination: false",  # 不替换实际连接目标 (保留原 IP, 规则匹配仍用嗅探域名)
+        "  sniff:",
+        "    HTTP:",
+        "      ports: [80, 8080-8880]",
+        "    TLS:",
+        "      ports: [443, 8443]",
+        "    QUIC:",
+        "      ports: [443, 8443]",
         "tun:",
         "  enable: true",
         "  stack: mixed",
@@ -1976,6 +1989,10 @@ def render_clash(nodes):
         "    - https://8.8.8.8/dns-query#节点选择",
         "  proxy-server-nameserver:",  # 节点域名解析只用国内 DNS (代理未就绪时可用)
         "    - https://223.6.6.6/dns-query",
+        "  direct-nameserver:",      # 直连出站的解析走国内 DNS (等价 sing-box 直连用 local DNS;
+        "    - https://223.6.6.6/dns-query",  # 否则直连域名被兜底 nameserver 经代理解析, 代理一断国内就废)
+        "    - https://119.29.29.29/dns-query",
+        "  direct-nameserver-follow-policy: true",
         "  respect-rules: true",       # DNS 查询遵循路由规则 (#节点选择 后缀走代理)
         "  nameserver-policy:",
         "    'rule-set:cn-site':",
@@ -2019,7 +2036,8 @@ def render_clash(nodes):
         "    behavior: domain",
         "    format: mrs",
         "    proxy: 节点选择",
-        "    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-cn.mrs",
+        # 注意用 cn 而非 geolocation-cn: 后者缺 qq/taobao/jd/bilibili 等主流国内域名
+        "    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs",
         "    path: ./rules/ksing-cn-site.mrs",
         "    interval: 86400",
         "  gfw-site:",
@@ -2039,8 +2057,21 @@ def render_clash(nodes):
         "    path: ./rules/ksing-cn-ip.mrs",
         "    interval: 86400",
         "rules:",
+        "  # 等价 sing-box 的 ip_is_private → direct (no-resolve: 不触发解析, 纯 IP 匹配)",
+        "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+        "  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+        "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+        "  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+        "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+        "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+        "  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+        "  - IP-CIDR6,::1/128,DIRECT,no-resolve",
+        "  - IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+        "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+        "  # 域名规则在前 (fake-ip 模式下不触发解析): 国内直连, 国外代理",
         "  - RULE-SET,cn-site,DIRECT",
         "  - RULE-SET,gfw-site,节点选择",
+        "  # IP 规则在后 (需解析, 未分类域名经兜底 nameserver 代理解析后判国内 IP)",
         "  - RULE-SET,cn-ip,DIRECT",
         "  - MATCH,节点选择",
     ]
@@ -2110,7 +2141,8 @@ def render_singbox(nodes):
             "default_http_client": "rule-set-downloader",
             "rule_set": [
                 rs("geoip-cn", gh + "/SagerNet/sing-geoip/rule-set/geoip-cn.srs"),
-                rs("geosite-cn", gh + "/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"),
+                # 注意用 MetaCubeX cn 而非 SagerNet geolocation-cn: 后者缺 qq/taobao/jd 等主流国内域名
+                rs("geosite-cn", gh + "/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"),
                 rs("ext-cn-domain", gh + "/xmdhs/cn-domain-list/rule-set/ext-cn-list.srs"),
                 rs("geosite-!cn", gh + "/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"),
                 rs("geosite-google", gh + "/SagerNet/sing-geosite/rule-set/geosite-google.srs"),
