@@ -1977,10 +1977,13 @@ def render_clash(nodes):
         "  listen: 127.0.0.1:1053",   # 仅本机监听 (0.0.0.0 会暴露到局域网)
         "  enhanced-mode: fake-ip",  # fakeip: 域名先路由后解析, 客户端拿到假 IP 不触发本地解析
         "  fake-ip-range: 198.18.0.1/16",
+        "  fake-ip-ttl: 1",          # 假 IP 回应 TTL=1: 客户端/系统不缓存, 每次现查
         "  fake-ip-filter:",         # 仅本地域名走真实 IP; 其余 (含国内域名) 一律 fake-ip —
         "    - '*.lan'",            #   解析时机推迟到出站: 直连出站用 direct-nameserver (国内),
         "    - '*.local'",          #   代理出站由节点远端解析 — rule/global/direct 三种模式行为一致,
         "    - 'localhost.*'",      #   全局模式不会残留任何国内 DNS 查询
+        # 注: mihomo 核心暂无禁用 DNS 缓存的选项 (官方 issue #1853); 但 fake-ip 设计下
+        # 代理流量始终把域名交给当前选中节点现解析, 缓存只影响规则匹配与直连解析 (受上游 TTL 约束)
         "  default-nameserver:",     # 仅用于解析下面的 DoH 服务器域名
         "    - 223.5.5.5",
         "    - 119.29.29.29",
@@ -2073,10 +2076,13 @@ def render_clash(nodes):
 def render_singbox(nodes):
     """sing-box 完整客户端配置订阅 (等价分流: 国内直连/国外代理, DNS 国内外分离)"""
     tags = [n["name"] for n in nodes]
+    # 信息节点 (socks 不可用) 不参与 urltest: 启动初期 urltest 未完成探测会选中死的信息节点,
+    # 规则集下载/全部流量挂死; 仅放入 selector 供用户查看状态
+    real_tags = [n["name"] for n in nodes if not n.get("socks")] or tags
     outbounds = [
         {"type": "selector", "tag": "selector", "outbounds": ["urltest"] + tags,
          "default": "urltest"},
-        {"type": "urltest", "tag": "urltest", "outbounds": tags,
+        {"type": "urltest", "tag": "urltest", "outbounds": real_tags,
          "url": "http://www.gstatic.com/generate_204", "interval": "3m"},
     ]
     for n in nodes:
@@ -2098,7 +2104,8 @@ def render_singbox(nodes):
     gh = "https://raw.githubusercontent.com"
     cfg = {
         "log": {"level": "info"},
-        "experimental": {"cache_file": {"enabled": True, "store_dns": True}},
+        # cache_file 仅保留规则集缓存 (大文件, 变更少); store_dns 已去除 — DNS 不持久化
+        "experimental": {"cache_file": {"enabled": True}},
         "dns": {
             "servers": [
                 {"type": "https", "tag": "local", "server": "223.6.6.6", "server_port": 443,
@@ -2117,7 +2124,9 @@ def render_singbox(nodes):
             ],
             "final": "remote",
             "strategy": "prefer_ipv4",
-            "optimistic": {"enabled": True, "timeout": "10m"},
+            # 禁用 DNS 缓存: 每次查询都按分流规则现查 — 切节点/切模式/规则变更后
+            # 不再返回旧出口解析的过期结果 (原 optimistic 会在 10 分钟内继续回过期缓存)
+            "disable_cache": True,
         },
         "http_clients": [{"tag": "rule-set-downloader", "detour": "selector"}],
         "inbounds": [{

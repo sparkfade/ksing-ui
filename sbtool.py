@@ -1150,6 +1150,8 @@ def build_server_config(base, sid):
             "rules": dns_rules,
             "final": "remote",
             "strategy": "prefer_ipv4",
+            # 禁用 DNS 缓存: 出站域名每次现解析, 规则/出站变更后不返回过期结果
+            "disable_cache": True,
         },
         "certificate_providers": cert_providers,
         "inbounds": [
@@ -1529,7 +1531,8 @@ def build_config(base):
     cfg = {
         "log": {"level": s["log_level"], "timestamp": True},
         "experimental": {
-            "cache_file": {"enabled": True, "store_dns": True,
+            # cache_file 仅保留规则集缓存; store_dns 已去除 — DNS 不持久化
+            "cache_file": {"enabled": True,
                            "path": os.path.join(base, "cache.db")},
         },
         "dns": {
@@ -1548,6 +1551,8 @@ def build_config(base):
             "rules": dns_rules,
             "final": "remote",
             "strategy": "prefer_ipv4",
+            # 禁用 DNS 缓存: 出站域名每次现解析, 规则/出站变更后不返回过期结果
+            "disable_cache": True,
         },
         "inbounds": [
             {
