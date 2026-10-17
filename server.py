@@ -1968,6 +1968,7 @@ def render_clash(nodes):
         "  stack: mixed",
         "  auto-route: true",
         "  auto-detect-interface: true",
+        "  strict-route: true",       # 严格路由: 阻止多宿主(WiFi+有线/虚拟网卡)时 DNS 绕过隧道泄露
         "  dns-hijack:",            # 拦截所有明文 DNS (含硬编码 DNS 的应用), 防泄露
         "    - any:53",
         "    - tcp://any:53",
