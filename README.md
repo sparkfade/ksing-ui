@@ -23,6 +23,7 @@ AnyTLS 中控面板：纯官方 sing-box 裸核节点 + 集中配置下发 + v2r
 - **节点管理**：一键安装命令接入（脚本 sha256 + CA 指纹双校验）；在线/同步状态；按节点分配用户；双栈 / 仅 IPv4 / 纯 IPv6
 - **三级分流**：全局规则 / 节点级（对该节点全体用户生效）/ 用户级（单独增删），出站为 Shadowsocks 节点池
 - **证书管理**：节点 sing-box 原生 ACME(Let's Encrypt）自动申请续签；IPv4/IPv6 使用不同域名并分别校验 A/AAAA，IPv6 未就绪只暂停该族；也支持 IP 自签（selfip）与显式 unsafe
+- **Cloudflare DNS**：CF Token 只存中控（接口只写不回显），节点上报 IP 后中控自动建 A/AAAA 记录并随 IP 变化更新；v4/v6 域名强制分离
 - **流量统计**：v2ray StatsService(gRPC）按用户/节点累计，仪表盘排名
 - **订阅**：按用户生成，sing-box / mihomo(Clash) / v2rayN 三格式（UA 嗅探或 `?type=`);mihomo 配置 fakeip + 防 DNS 泄露；自定义订阅 host/路径，一键重置换发
 - **面板账号**：管理员 + 多用户独立登录（用户只见自己的节点与订阅）；亮/暗主题；移动端适配
@@ -59,14 +60,19 @@ python3 /opt/ksing-ui/server.py --dir /etc/ksing-ui --listen 0.0.0.0 --port 8080
 
 ### 2. 接入节点（每台 VPS)
 
-面板 → 服务器节点 → 添加节点：
+面板 → 服务器节点 → 添加节点，只需填 **名称 / 端口 / 绑定域名**:
 
-- **网络模式**：默认双栈（有 IPv6 自动使用）；也可选仅 IPv4 或纯 IPv6
-- **域名证书（推荐）**：IPv4 域名需 A 记录指向节点；如使用 IPv6，IPv6 域名需单独配置 AAAA 记录，放行 80 端口供 ACME 验证。IPv6 域名未就绪时，面板提示并仅暂停 IPv6 入口，不影响 IPv4
+- **网络模式**：默认双栈（节点安装时自动检测 IPv4/IPv6）；也可选仅 IPv4 或纯 IPv6
+- **Cloudflare 自动 DNS（推荐）**：在 设置 页配置 CF API Token（Zone.DNS Edit）后，节点开启「自动 DNS」即可——节点上报公网 IP，**中控**自动创建记录（Token 不出中控）：
+  - 有 IPv4：绑定域名创建 A 记录（如 `hk1.example.com`）
+  - 还有 IPv6：自动使用首段加 `-v6` 的独立域名创建 AAAA 记录（`hk1-v6.example.com`）
+  - 严禁同一域名同时有 A 和 AAAA；同名冲突记录会被自动纠正
+  - IP 变化自动更新（DDNS）；删除节点时自动清理记录
+- **域名证书**：记录就绪后由节点 sing-box 原生 ACME(Let's Encrypt）自动申请续签，放行 80 端口供验证
 - **IP 自签证书**：无域名时生成含 IPv4/IPv6 SAN 的自签证书，客户端需 allowInsecure
 - **不安全模式**：需显式确认，自签假域名证书
 
-提交后得到一键安装命令，在节点上以 root 执行即可（装 sing-box + agent + systemd，自动拉起）。
+提交后得到一键安装命令，在节点上以 root 执行即可（装 sing-box + agent + systemd，自动拉起并自动识别 v4/v6）。
 
 ### 3. 日常使用
 

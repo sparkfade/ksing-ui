@@ -109,15 +109,13 @@ case "$CERT_MODE" in
     if [ "$IP_MODE" = "ipv6" ]; then
       [ -n "$DOMAIN6" ] || { echo "纯 IPv6 节点需要配置 IPv6 域名"; exit 1; }
       echo "  使用 ACME 自动证书: $DOMAIN6 (由 sing-box 申请并自动续签)"
-      echo "  请确认: ① $DOMAIN6 的 AAAA 记录已解析到本机 IPv6 ② 本机 80 端口空闲且放行 (HTTP-01 验证)"
+      echo "  若面板开启了 Cloudflare 自动 DNS: 上报 IP 后自动创建 AAAA 记录, 无需手动解析"
     else
       [ -n "$DOMAIN" ] || { echo "acme 模式但面板未配置 IPv4 域名"; exit 1; }
       echo "  使用 ACME 自动证书: $DOMAIN${DOMAIN6:+, $DOMAIN6} (由 sing-box 申请并自动续签)"
-      echo "  请确认: ① $DOMAIN 的 A 记录已解析到本机 IPv4 ${DOMAIN6:+; $DOMAIN6 的 AAAA 记录已解析到本机 IPv6 }② 本机 80 端口空闲且放行 (HTTP-01 验证)"
-      if [ "$IP_MODE" != "ipv4" ] && [ -z "$DOMAIN6" ]; then
-        echo "  提示: 若本机存在 IPv6, 面板检测到后会要求补充 IPv6 域名并校验 AAAA; 未就绪时仅停用 IPv6 入口"
-      fi
+      echo "  若面板开启了 Cloudflare 自动 DNS: 上报 IP 后自动创建 A/AAAA 记录, 无需手动解析; 否则请先自行解析域名到本机"
     fi
+    echo "  请确认: 本机 80 端口空闲且放行 (HTTP-01 验证)"
     if ss -tln 2>/dev/null | grep -qE ':(80)\s'; then
       echo "  警告: 80 端口已被占用, ACME HTTP-01 验证可能失败"
     fi

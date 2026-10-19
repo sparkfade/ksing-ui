@@ -358,6 +358,8 @@ def server_view(sid, srv, traffic=None):
         "port": srv.get("port"),
         "domain": srv.get("domain", ""),
         "domain6": srv.get("domain6", ""),
+        "dns_managed": bool(srv.get("dns_managed")),
+        "dns_sync": srv.get("dns_sync") or {},
         "ip_mode": srv.get("ip_mode") or "dual",
         "cert_mode": srv.get("cert_mode") or "",
         "acme_email": srv.get("acme_email", ""),
@@ -1329,11 +1331,13 @@ def h_ruleset_sources(ctx):
 SETTINGS_EDITABLE = ("final", "host", "sni",
                      "private_action", "auto_detect_interface", "log_level",
                      "panel_listen", "panel_port",
-                     "sub_host", "sub_port", "sub_path")
+                     "sub_host", "sub_port", "sub_path",
+                     "cf_api_token", "cf_zone_id")
 
 def h_settings_get(ctx):
     s = sbtool.get_settings(BASE)
-    out = {k: s.get(k) for k in SETTINGS_EDITABLE}
+    out = {k: s.get(k) for k in SETTINGS_EDITABLE if k != "cf_api_token"}  # token 只写不回显
+    out["cf_token_set"] = bool(s.get("cf_api_token"))
     out["admin_user"] = s.get("admin_user", "admin")
     return 200, out
 
@@ -1375,9 +1379,30 @@ def h_settings_put(ctx):
                     raise ApiError("订阅地址仅限 域名/IP[:端口]")
                 if v and ":" in v and not (1 <= int(v.rsplit(":", 1)[1]) <= 65535):
                     raise ApiError("订阅地址端口非法")
+            if k == "cf_api_token":
+                v = str(v).strip()
+                if v and not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", v):
+                    raise ApiError("Cloudflare API Token 格式非法")
+            if k == "cf_zone_id":
+                v = str(v).strip().lower()
+                if v and not re.fullmatch(r"[0-9a-f]{32}", v):
+                    raise ApiError("Cloudflare Zone ID 应为 32 位十六进制")
             raw[k] = v
             s[k] = v
     sbtool.save_json(sbtool.paths(BASE)["settings"], raw)
+    return 200, {"ok": True}
+
+
+def h_settings_cf_test(ctx):
+    """校验 Cloudflare Token: 优先测用户刚输入的, 否则测已保存的"""
+    token = str(ctx.body.get("token") or "").strip()
+    if not token:
+        token = sbtool.get_settings(BASE).get("cf_api_token") or ""
+    if not token:
+        raise ApiError("未配置 Cloudflare API Token")
+    ok, err = sbtool.cf_verify_token(token)
+    if not ok:
+        return 200, {"ok": False, "error": err}
     return 200, {"ok": True}
 
 
@@ -1468,7 +1493,32 @@ def _validate_server_payload(b, partial=False):
         out["note"] = (b.get("note") or "")[:200]
     if "enabled" in b:
         out["enabled"] = bool(b["enabled"])
+    if "dns_managed" in b:
+        out["dns_managed"] = bool(b["dns_managed"])
     return out
+
+
+def _apply_domain_plan(fields):
+    """域名推导: 双栈节点只输入一个绑定域名, IPv6 域名留空时自动派生首段 -v6
+    (hk.example.com → hk-v6.example.com); v4/v6 永远使用不同域名"""
+    if (fields.get("ip_mode") or "dual") == "dual" \
+            and fields.get("domain") and not fields.get("domain6"):
+        fields["domain6"] = sbtool.derive_v6_domain(fields["domain"])
+
+
+def _check_domain_unique(servers, sid, fields):
+    """acme 节点的域名不可与其他 acme 节点重复 (否则 HTTP-01 验证与 DNS 管理互相打架)"""
+    if fields.get("cert_mode") != "acme":
+        return
+    want = {d for d in (fields.get("domain"), fields.get("domain6")) if d}
+    if not want:
+        return
+    for osid, o in servers.items():
+        if osid == sid or o.get("cert_mode") != "acme":
+            continue
+        clash = want & {o.get("domain") or "", o.get("domain6") or ""}
+        if clash:
+            raise ApiError("域名 %s 已被节点 %s 使用" % (sorted(clash)[0], o.get("name", osid)))
 
 
 def _validate_server_domain_plan(fields):
@@ -1487,6 +1537,8 @@ def _validate_server_domain_plan(fields):
             raise ApiError("acme 模式需要配置 IPv4 域名")
         if mode == "ipv6" and not domain6:
             raise ApiError("纯 IPv6 节点需要配置 IPv6 域名")
+    if fields.get("dns_managed") and fields.get("cert_mode") != "acme":
+        raise ApiError("Cloudflare DNS 自动管理仅适用于域名证书 (acme) 模式")
 
 
 def h_servers_list(ctx):
@@ -1497,9 +1549,11 @@ def h_servers_list(ctx):
 
 def h_servers_add(ctx):
     fields = _validate_server_payload(ctx.body)
+    _apply_domain_plan(fields)
     _validate_server_domain_plan(fields)
     with PROC_LOCK:
         servers = sbtool.load_servers(BASE)
+        _check_domain_unique(servers, "", fields)
         sid = secrets.token_hex(4)
         while sid in servers:  # 防 sid 碰撞
             sid = secrets.token_hex(4)
@@ -1510,6 +1564,8 @@ def h_servers_add(ctx):
         srv.update(fields)
         servers[sid] = srv
         sbtool.save_servers(BASE, servers)
+    if fields.get("dns_managed"):
+        maybe_dns_sync(sid, reason="manual")  # 尚无上报 IP → 先落 pending 状态
     return 200, {"sid": sid, "token": token,
                  "install_command": install_command(sid, token, request_host_port(ctx.headers),
                                                   "https" if ctx.headers.get("X-Forwarded-Proto") == "https" else "http")}
@@ -1524,10 +1580,37 @@ def h_servers_update(ctx):
             raise ApiError("节点不存在", 404)
         merged = dict(servers[sid])
         merged.update(fields)
+        _apply_domain_plan(merged)  # domain6 显式清空 = 跟随 domain 重新派生
         _validate_server_domain_plan(merged)
-        servers[sid].update(fields)
+        _check_domain_unique(servers, sid, merged)
+        dns_keys = ("domain", "domain6", "ip_mode", "dns_managed", "cert_mode")
+        dns_changed = any(servers[sid].get(k) != merged.get(k) for k in dns_keys)
+        if dns_changed:
+            merged["dns_sync"] = {}  # 域名/模式变了, 重置同步状态强制重新同步
+        servers[sid].update(merged)
         sbtool.save_servers(BASE, servers)
+    if dns_changed and merged.get("dns_managed"):
+        maybe_dns_sync(sid, reason="manual")
     return 200, {"ok": True}
+
+
+def _dns_cleanup_bg(srv):
+    """节点删除后清理其 Cloudflare 记录 (仅删指向该节点上报 IP 的本族记录)"""
+    s = sbtool.get_settings(BASE)
+    token = s.get("cf_api_token") or ""
+    if not token:
+        return
+    zone_id = s.get("cf_zone_id") or ""
+    for family, name, rtype in sbtool.node_dns_plan(srv):
+        ip = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
+        if not ip:
+            continue
+        try:
+            zid = sbtool.cf_find_zone(token, name, zone_id)
+            sbtool.cf_purge_record(token, zid, name, rtype, ip)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
 
 def h_servers_del(ctx):
@@ -1536,6 +1619,7 @@ def h_servers_del(ctx):
         servers = sbtool.load_servers(BASE)
         if sid not in servers:
             raise ApiError("节点不存在", 404)
+        srv = dict(servers[sid])
         del servers[sid]
         sbtool.save_servers(BASE, servers)
         # 清理分流规则中对该节点的引用
@@ -1549,6 +1633,8 @@ def h_servers_del(ctx):
                 changed = True
         if changed:
             sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+    if srv.get("dns_managed"):
+        threading.Thread(target=_dns_cleanup_bg, args=(srv,), daemon=True).start()
     return 200, {"ok": True}
 
 
@@ -1581,6 +1667,50 @@ def h_traffic(ctx):
     t = sbtool.load_traffic(BASE)
     t["rates"] = current_rates()
     return 200, t
+
+
+# ------------------------------------------------------------------ Cloudflare DNS 同步调度
+
+_DNS_SYNCING = set()           # 正在同步的 sid (防并发重入)
+_DNS_SYNCING_LOCK = threading.Lock()
+
+
+def maybe_dns_sync(sid, reason="auto"):
+    """需要同步时启动后台线程执行 Cloudflare DNS 同步; 绝不阻塞调用方 (如节点心跳)"""
+    srv = sbtool.load_servers(BASE).get(sid)
+    if not srv or not sbtool.dns_sync_needed(srv):
+        return False
+    with _DNS_SYNCING_LOCK:
+        if sid in _DNS_SYNCING:
+            return False
+        _DNS_SYNCING.add(sid)
+
+    def _run():
+        try:
+            sbtool.sync_node_dns(BASE, sid, reason=reason, lock=PROC_LOCK)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        finally:
+            with _DNS_SYNCING_LOCK:
+                _DNS_SYNCING.discard(sid)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+def h_servers_dns_sync(ctx):
+    """手动强制同步节点 DNS 记录 (异步执行, 前端稍后刷新看状态)"""
+    sid = ctx.match.group(1)
+    srv = sbtool.load_servers(BASE).get(sid)
+    if not srv:
+        raise ApiError("节点不存在", 404)
+    if not srv.get("dns_managed") or srv.get("cert_mode") != "acme":
+        raise ApiError("该节点未启用 Cloudflare DNS 管理 (仅 acme 域名证书节点可用)")
+    if not sbtool.get_settings(BASE).get("cf_api_token"):
+        raise ApiError("未配置 Cloudflare API Token, 请先在设置页配置")
+    maybe_dns_sync(sid, reason="manual")
+    return 200, {"ok": True}
 
 
 # ------------------------------------------------------------------ 实时带宽速率
@@ -1875,6 +2005,9 @@ def h_agent_report(ctx):
             pass
         fields["cert_issuer"] = str(cert.get("issuer") or "")[:128]
     touch_server(ctx.sid, **fields)
+    # 节点上报了公网 IP: dns_managed 节点据此在中控侧创建/更新 Cloudflare 记录
+    if ctx.srv.get("dns_managed") and ctx.srv.get("cert_mode") == "acme":
+        maybe_dns_sync(ctx.sid)
     # 流量记账: 当前分配 + 近 90 天实际下发过的用户; accounted=false 时 agent 按原 ID 重试
     accounted = False
     try:
@@ -2003,6 +2136,7 @@ ROUTES = [
     ("PUT", r"/api/servers/([0-9a-f]{8})", h_servers_update, "admin"),
     ("DELETE", r"/api/servers/([0-9a-f]{8})", h_servers_del, "admin"),
     ("POST", r"/api/servers/([0-9a-f]{8})/token", h_servers_token, "admin"),
+    ("POST", r"/api/servers/([0-9a-f]{8})/dns_sync", h_servers_dns_sync, "admin"),
     ("GET", r"/api/servers/([0-9a-f]{8})/config", h_servers_config, "admin"),
     ("GET", r"/api/traffic", h_traffic, "admin"),
     ("GET", r"/api/system", h_system, "admin"),
@@ -2027,6 +2161,7 @@ ROUTES = [
     ("GET", r"/api/settings", h_settings_get, "admin"),
     ("PUT", r"/api/settings", h_settings_put, "admin"),
     ("POST", r"/api/settings/admin", h_settings_admin, "admin"),
+    ("POST", r"/api/settings/cf_test", h_settings_cf_test, "admin"),
     ("GET", r"/api/me", h_me, "user"),
     ("POST", r"/api/me/password", h_me_password, "user"),
     ("POST", r"/api/me/refresh_token", h_me_refresh_token, "user"),

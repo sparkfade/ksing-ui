@@ -38,7 +38,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -787,7 +787,23 @@ def main():
     _LOCK_F = acquire_instance_lock()
     state = load_state()
     if once:
-        pull_config(state)
+        # 先上报公网 IPv4/IPv6: 面板据此自动创建 Cloudflare DNS 记录,
+        # 再拉配置才不会卡在 "ACME 域名 DNS 未就绪"
+        try:
+            report(state)
+        except Exception as e:  # noqa: BLE001
+            log("初始上报失败(稍后重试拉配置): %s" % e)
+        deadline = time.time() + 180  # DNS 创建与生效需要时间, 最长等 3 分钟
+        while True:
+            try:
+                pull_config(state)
+                break
+            except Exception as e:  # noqa: BLE001
+                if time.time() >= deadline:
+                    raise
+                LAST_ERROR[0] = str(e)[:300]
+                log("首次拉取配置失败: %s (10 秒后重试, 等待面板 DNS 同步生效)" % e)
+                time.sleep(10)
         if not singbox_running():
             log("sing-box 未运行, 启动")
             restart_singbox(relaunch=True)

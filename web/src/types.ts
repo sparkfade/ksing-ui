@@ -52,6 +52,15 @@ export interface FamilyStatus {
   address: string
 }
 
+export interface DnsSyncState {
+  state: 'ok' | 'pending' | 'fail' | 'off' | ''
+  name?: string
+  ip?: string
+  error?: string
+  at?: number
+  detail?: string
+}
+
 export interface ServerItem {
   sid: string
   name: string
@@ -59,6 +68,8 @@ export interface ServerItem {
   reported_ip: string
   domain6: string
   ip_mode: 'dual' | 'ipv4' | 'ipv6'
+  dns_managed?: boolean
+  dns_sync?: { ipv4?: DnsSyncState; ipv6?: DnsSyncState }
   reported_ipv4: string
   reported_ipv6: string
   ip_status?: { ipv4: FamilyStatus; ipv6: FamilyStatus }
@@ -184,6 +195,8 @@ export interface Settings {
   sub_host: string
   sub_path: string
   sub_port?: number
+  cf_token_set?: boolean
+  cf_zone_id?: string
   admin_user: string
 }
 

@@ -45,6 +45,12 @@
                       :title="`上报 ${s.ip_status[f].reported_ip} · ${s.ip_status[f].error}`"
                     >⚠ {{ famWarnText(s, f) }}</span>
                     <span v-else class="muted">{{ s.ip_status[f].error || '等待上报' }}</span>
+                    <span
+                      v-if="s.dns_managed && s.ip_status[f].enabled"
+                      class="dns-badge"
+                      :class="dnsStateCls(s, f)"
+                      :title="dnsStateTitle(s, f)"
+                    >{{ dnsStateText(s, f) }}</span>
                   </div>
                 </template>
                 <span v-else class="muted">待上报</span>
@@ -78,6 +84,7 @@
                 <div class="row" style="gap: 6px">
                   <Button small @click="openEdit(s)">编辑</Button>
                   <Button small @click="openRoute(s)">分流</Button>
+                  <Button v-if="s.dns_managed" small title="立即向 Cloudflare 同步该节点的 DNS 记录" @click="dnsSync(s)">同步DNS</Button>
                   <Button small title="重新生成部署命令，旧 token 立即失效" @click="resetToken(s)">重新部署</Button>
                   <Button small @click="preview(s)">配置</Button>
                   <Button small variant="danger" @click="del(s)">删除</Button>
@@ -98,20 +105,29 @@
         <Select v-model="form.cert_mode" label="证书模式" :options="CERT_MODES" />
         <template v-if="form.cert_mode === 'acme'">
           <Input
-            v-if="form.ip_mode !== 'ipv6'"
             v-model="form.domain"
-            label="IPv4 域名"
-            hint="需要 A 记录解析到该节点 IPv4, 并放行 80 端口用于验证"
+            :label="form.ip_mode === 'ipv6' ? '绑定域名 (IPv6)' : '绑定域名'"
+            :hint="form.ip_mode === 'dual'
+              ? '只需填这一个域名；检测到节点有 IPv6 时，自动使用 ' + (derivedDomain6 || '首段加 -v6 的域名') + ' 作为 IPv6 域名'
+              : '需解析到该节点，并放行 80 端口用于验证'"
             placeholder="node1.example.com"
           />
           <Input
-            v-if="form.ip_mode !== 'ipv4'"
+            v-if="editing && form.ip_mode === 'dual'"
             v-model="form.domain6"
             label="IPv6 域名"
-            :hint="form.ip_mode === 'dual' ? '需要 AAAA 记录; 双栈可后补, 未就绪时自动暂停 IPv6 入口' : '需要 AAAA 记录解析到该节点 IPv6, 并放行 80 端口用于验证'"
-            placeholder="node1-v6.example.com"
+            hint="留空则跟随绑定域名自动派生 (首段加 -v6)"
+            :placeholder="derivedDomain6 || 'node1-v6.example.com'"
           />
           <Input v-model="form.acme_email" label="ACME 邮箱" hint="可选" placeholder="admin@example.com" />
+          <div class="fw dns-row">
+            <Toggle v-model="form.dns_managed" label="Cloudflare 自动 DNS" />
+            <p class="muted dns-hint">
+              <template v-if="form.dns_managed && !cfTokenSet">未配置 Cloudflare API Token（请到 设置 页配置），记录不会自动创建。</template>
+              <template v-else-if="form.dns_managed">节点安装后上报 IP，中控自动创建/更新 A 与 AAAA 记录（proxied 关闭），随后自动申请证书。</template>
+              <template v-else>关闭则需在 Cloudflare 手动解析域名到节点 IP。</template>
+            </p>
+          </div>
         </template>
         <p v-else-if="form.cert_mode === 'selfip'" class="muted cert-tip">
           按节点 IP 签发自签证书，客户端需允许不安全连接 (allowInsecure)。
@@ -229,14 +245,28 @@ const form = reactive({
   name: '',
   port: 18443,
   ip_mode: 'dual' as 'dual' | 'ipv4' | 'ipv6',
-  cert_mode: 'selfip' as 'acme' | 'selfip' | 'unsafe',
+  cert_mode: 'acme' as 'acme' | 'selfip' | 'unsafe',
   domain: '',
   domain6: '',
   acme_email: '',
+  dns_managed: true,
   unsafe_ok: false,
   users_mode: 'all' as 'all' | 'selected' | 'none',
   users: [] as string[],
   note: '',
+})
+const cfTokenSet = ref(false)
+
+// 与后端 sbtool.derive_v6_domain 同规则: 双栈时 IPv6 域名 = 首段加 -v6
+const derivedDomain6 = computed(() => {
+  const d = form.domain.trim().toLowerCase()
+  if (!d || form.ip_mode !== 'dual') return ''
+  const labels = d.split('.')
+  if (labels.length >= 3) {
+    labels[0] += '-v6'
+    return labels.join('.')
+  }
+  return `v6.${d}`
 })
 
 // 切换网络模式时清空不适用的域名
@@ -296,6 +326,38 @@ function famWarnText(s: ServerItem, f: 'ipv4' | 'ipv6'): string {
   return `IPv4 异常: ${err}`
 }
 
+function dnsEnt(s: ServerItem, f: 'ipv4' | 'ipv6') {
+  return s.dns_sync?.[f]
+}
+
+function dnsStateText(s: ServerItem, f: 'ipv4' | 'ipv6'): string {
+  const st = dnsEnt(s, f)?.state || 'pending'
+  return { ok: 'DNS✓', pending: 'DNS…', fail: 'DNS✗', off: '' }[st] ?? 'DNS…'
+}
+
+function dnsStateCls(s: ServerItem, f: 'ipv4' | 'ipv6'): string {
+  const st = dnsEnt(s, f)?.state || 'pending'
+  return { ok: 'dns-ok', pending: 'dns-pending', fail: 'dns-fail', off: 'dns-off' }[st] ?? 'dns-pending'
+}
+
+function dnsStateTitle(s: ServerItem, f: 'ipv4' | 'ipv6'): string {
+  const e = dnsEnt(s, f)
+  if (!e) return '等待节点上报地址后自动同步'
+  if (e.state === 'ok') return `${e.name || ''} → ${e.ip || ''} · ${e.detail || '已同步'}`
+  if (e.state === 'fail') return `DNS 同步失败: ${e.error || '未知错误'}`
+  return e.error || '等待同步'
+}
+
+async function dnsSync(s: ServerItem) {
+  try {
+    await post(`/api/servers/${s.sid}/dns_sync`)
+    toast(`已触发 ${s.name} 的 DNS 同步`, 'success')
+    setTimeout(load, 3000)
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -314,6 +376,12 @@ async function ensureUsers() {
   } catch (e) {
     toast((e as Error).message, 'error')
   }
+  try {
+    const s = await get<{ cf_token_set?: boolean }>('/api/settings')
+    cfTokenSet.value = !!s.cf_token_set
+  } catch {
+    cfTokenSet.value = false
+  }
 }
 
 function openAdd() {
@@ -322,10 +390,11 @@ function openAdd() {
     name: '',
     port: 18443,
     ip_mode: 'dual',
-    cert_mode: 'selfip',
+    cert_mode: 'acme',
     domain: '',
     domain6: '',
     acme_email: '',
+    dns_managed: true,
     unsafe_ok: false,
     users_mode: 'all',
     users: [],
@@ -342,9 +411,10 @@ function openEdit(s: ServerItem) {
     port: s.port,
     ip_mode: s.ip_mode || 'dual',
     cert_mode: s.cert_mode || (s.domain || s.domain6 ? 'acme' : 'selfip'),
-    domain: s.domain,
+    domain: s.ip_mode === 'ipv6' ? s.domain6 : s.domain,
     domain6: s.domain6 || '',
     acme_email: s.acme_email,
+    dns_managed: !!s.dns_managed,
     unsafe_ok: false,
     users_mode: s.users_mode,
     users: [...(s.users || [])],
@@ -366,16 +436,12 @@ async function save() {
   }
   if (form.cert_mode === 'acme') {
     const d4 = form.domain.trim()
-    const d6 = form.domain6.trim()
-    if (form.ip_mode !== 'ipv6' && !d4) {
-      toast('acme 模式需要配置 IPv4 域名', 'error')
+    if (!d4) {
+      toast('acme 模式需要填写绑定域名', 'error')
       return
     }
-    if (form.ip_mode === 'ipv6' && !d6) {
-      toast('纯 IPv6 节点需要配置 IPv6 域名', 'error')
-      return
-    }
-    if (d4 && d6 && d4.toLowerCase() === d6.toLowerCase()) {
+    if (editing.value && form.ip_mode === 'dual' && form.domain6.trim()
+        && d4.toLowerCase() === form.domain6.trim().toLowerCase()) {
       toast('IPv4 与 IPv6 域名不能相同', 'error')
       return
     }
@@ -388,8 +454,11 @@ async function save() {
     toast('请选择至少一个用户，或把用户分配改为「无用户」', 'error')
     return
   }
+  // 单一「绑定域名」输入: 纯 IPv6 节点即为 IPv6 域名; 双栈 IPv6 域名留空由后端派生 (首段 -v6)
   const domain = form.cert_mode === 'acme' && form.ip_mode !== 'ipv6' ? form.domain.trim() : ''
-  const domain6 = form.cert_mode === 'acme' && form.ip_mode !== 'ipv4' ? form.domain6.trim() : ''
+  const domain6 = form.cert_mode === 'acme'
+    ? (form.ip_mode === 'ipv6' ? form.domain.trim() : (editing.value ? form.domain6.trim() : ''))
+    : ''
   const acmeEmail = form.cert_mode === 'acme' ? form.acme_email.trim() : ''
   saving.value = true
   try {
@@ -405,6 +474,7 @@ async function save() {
         domain,
         domain6,
         acme_email: acmeEmail,
+        dns_managed: form.cert_mode === 'acme' && form.dns_managed,
       }
       if (form.users_mode === 'selected') body.users = form.users
       if (form.cert_mode === 'unsafe') body.unsafe_ok = true
@@ -415,6 +485,7 @@ async function save() {
       const body: Record<string, unknown> = {
         name: form.name.trim(), port, cert_mode: form.cert_mode, users_mode: form.users_mode,
         ip_mode: form.ip_mode,
+        dns_managed: form.cert_mode === 'acme' && form.dns_managed,
       }
       if (domain) body.domain = domain
       if (domain6) body.domain6 = domain6
@@ -487,7 +558,8 @@ async function preview(s: ServerItem) {
 }
 
 async function del(s: ServerItem) {
-  if (!(await confirmDialog(`确定删除服务器节点「${s.name}」？\n节点上的 agent 将无法再连接面板。`))) return
+  const dnsNote = s.dns_managed ? '\n其在 Cloudflare 上由面板创建的 DNS 记录也会一并删除。' : ''
+  if (!(await confirmDialog(`确定删除服务器节点「${s.name}」？\n节点上的 agent 将无法再连接面板。${dnsNote}`))) return
   try {
     await httpDel(`/api/servers/${s.sid}`)
     toast('已删除', 'success')
@@ -537,6 +609,48 @@ onUnmounted(() => clearInterval(timer))
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: help;
+}
+
+.dns-badge {
+  font-size: 11px;
+  padding: 0 5px;
+  border-radius: 4px;
+  line-height: 1.6;
+  cursor: help;
+  flex-shrink: 0;
+}
+
+.dns-ok {
+  color: var(--c-green);
+  background: color-mix(in srgb, var(--c-green) 12%, transparent);
+}
+
+.dns-pending {
+  color: var(--c-yellow);
+  background: color-mix(in srgb, var(--c-yellow) 12%, transparent);
+}
+
+.dns-fail {
+  color: var(--c-red);
+  background: color-mix(in srgb, var(--c-red) 12%, transparent);
+}
+
+.dns-off {
+  display: none;
+}
+
+.dns-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dns-hint {
+  margin: 0;
+  font-size: 12.5px;
+  flex: 1;
+  min-width: 220px;
 }
 
 .cert-exp {

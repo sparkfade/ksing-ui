@@ -195,6 +195,9 @@ DEFAULT_SETTINGS = {
     "sub_host": "",            # 订阅地址的主机 (域名或 IP, 可带 :端口; 空=跟随请求 Host)
     "sub_port": 0,             # 订阅地址的端口 (0=跟随 sub_host 或请求; 反代到 443 时很有用)
     "sub_path": "sub",         # 订阅路径 (如 sub → /sub/<token>; 改后旧订阅地址失效)
+    # ---- Cloudflare DNS 自动管理 (只存中控, 节点不接触) ----
+    "cf_api_token": "",        # CF API Token (需 Zone.DNS Edit 权限); 接口只写不回显
+    "cf_zone_id": "",          # 可选: 单 zone 场景直接指定, 留空按域名逐级自动定位
 }
 
 def get_settings(base):
@@ -947,6 +950,8 @@ def load_servers(base):
         srv.setdefault("last_error", "")
         srv.setdefault("cert_not_after", 0)  # agent 上报的证书过期时间 (unix 秒)
         srv.setdefault("cert_issuer", "")
+        srv.setdefault("dns_managed", False)  # 面板用 CF API 自动管理该节点域名解析
+        srv.setdefault("dns_sync", {})        # {ipv4/ipv6: {state,ip,name,error,at,detail}}
         out[sid] = srv
     return out
 
@@ -1068,6 +1073,234 @@ def server_acme_domains(srv):
     if st["ipv6"]["enabled"] and srv.get("domain6") and st["ipv6"]["active"]:
         domains.append(srv["domain6"])
     return domains
+
+
+# ---------------------------------------------------------------- Cloudflare DNS 自动管理
+# CF Token 只保存在中控 (settings.json 0600), 节点只上报公网 IP, 记录创建由中控执行。
+
+CF_API = os.environ.get("KSING_CF_API", "https://api.cloudflare.com/client/v4").rstrip("/")
+CF_DNS_TTL = 120
+DNS_SYNC_FAIL_RETRY = 60  # 同步失败后的最小重试间隔 (秒)
+_CF_ZONE_CACHE = {}       # zone 名 -> zone_id (进程内缓存; zone 归属几乎不变)
+
+
+def derive_v6_domain(domain):
+    """双栈节点的 IPv6 域名: 首段加 -v6 (hk.example.com → hk-v6.example.com);
+    输入是根域 (example.com) 时无法加后缀, 退化为 v6 子域 (v6.example.com)"""
+    domain = (domain or "").strip().lower()
+    if not domain:
+        return ""
+    labels = domain.split(".")
+    if len(labels) >= 3:
+        labels[0] += "-v6"
+        return ".".join(labels)
+    return "v6." + domain
+
+
+def node_dns_plan(srv):
+    """节点应有的 DNS 记录: [(family, fqdn, rtype)]; 严禁同一域名同时有 A 与 AAAA"""
+    mode = srv.get("ip_mode") or "dual"
+    out = []
+    if mode in ("dual", "ipv4") and srv.get("domain"):
+        out.append(("ipv4", srv["domain"], "A"))
+    if mode in ("dual", "ipv6"):
+        d6 = srv.get("domain6") or derive_v6_domain(srv.get("domain", ""))
+        if d6:
+            out.append(("ipv6", d6, "AAAA"))
+    return out
+
+
+def cf_request(method, path, token, payload=None, timeout=20):
+    """Cloudflare API 调用; 成功返回 result, 失败抛 RuntimeError"""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(CF_API + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "ksing-ui/%s" % VERSION)
+    body = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            raise RuntimeError("Cloudflare HTTP %d" % e.code)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("Cloudflare 请求失败: %s" % e)
+    if not body.get("success"):
+        errs = body.get("errors") or []
+        msg = "; ".join(str(x.get("message", x)) for x in errs[:3] if isinstance(x, dict))
+        raise RuntimeError("Cloudflare: %s" % (msg or str(body)[:200]))
+    return body.get("result")
+
+
+def cf_verify_token(token):
+    """校验 CF token 有效性; 返回 (ok, 错误消息)"""
+    try:
+        cf_request("GET", "/user/tokens/verify", token, timeout=15)
+        return True, ""
+    except RuntimeError as e:
+        return False, str(e)
+
+
+def cf_find_zone(token, domain, zone_id=""):
+    """逐级剥子域名定位所属 zone (four.three.example.com → example.com); zone_id 显式指定时直接用"""
+    if zone_id:
+        return zone_id
+    probe = (domain or "").strip().lower()
+    while "." in probe:
+        if probe in _CF_ZONE_CACHE:
+            return _CF_ZONE_CACHE[probe]
+        result = cf_request("GET", "/zones?name=%s&per_page=1" % urllib.parse.quote(probe), token)
+        if result:
+            zid = str(result[0]["id"])
+            _CF_ZONE_CACHE[probe] = zid
+            return zid
+        probe = probe.split(".", 1)[1]
+    raise RuntimeError("找不到 %s 所属的 Cloudflare zone (token 权限不足或域名未托管)" % domain)
+
+
+def cf_ensure_record(token, zone_id, name, rtype, content):
+    """确保 name 存在指向 content 的 rtype 记录 (proxied=false, TTL 120);
+    同名异族记录 (A/AAAA) 直接删除 — 严禁一个域名同时有 A 和 AAAA。
+    返回变更描述列表"""
+    recs = cf_request("GET", "/zones/%s/dns_records?name=%s"
+                      % (zone_id, urllib.parse.quote(name)), token) or []
+    want = rtype.upper()
+    other = "AAAA" if want == "A" else "A"
+    changes = []
+    matched = False
+    for rec in recs:
+        rt, rid = rec.get("type"), rec.get("id")
+        if rt == other:
+            cf_request("DELETE", "/zones/%s/dns_records/%s" % (zone_id, rid), token)
+            changes.append("删除冲突的 %s 记录" % other)
+        elif rt == want:
+            if not matched and rec.get("content") == content and not rec.get("proxied"):
+                matched = True  # 已符合目标状态
+            elif not matched:
+                cf_request("PUT", "/zones/%s/dns_records/%s" % (zone_id, rid), token,
+                           {"type": want, "name": name, "content": content,
+                            "ttl": CF_DNS_TTL, "proxied": False})
+                matched = True
+                changes.append("更新 %s → %s" % (want, content))
+            else:
+                cf_request("DELETE", "/zones/%s/dns_records/%s" % (zone_id, rid), token)
+                changes.append("删除重复的 %s 记录" % want)
+    if not matched:
+        cf_request("POST", "/zones/%s/dns_records" % zone_id, token,
+                   {"type": want, "name": name, "content": content,
+                    "ttl": CF_DNS_TTL, "proxied": False})
+        changes.append("创建 %s → %s" % (want, content))
+    return changes
+
+
+def cf_purge_record(token, zone_id, name, rtype, content):
+    """删除 name 下指向 content 的 rtype 记录 (节点删除时清理); 返回是否删除过"""
+    recs = cf_request("GET", "/zones/%s/dns_records?name=%s&type=%s"
+                      % (zone_id, urllib.parse.quote(name), rtype), token) or []
+    done = False
+    for rec in recs:
+        if rec.get("content") == content:
+            cf_request("DELETE", "/zones/%s/dns_records/%s" % (zone_id, rec["id"]), token)
+            done = True
+    return done
+
+
+def dns_sync_needed(srv, now=None):
+    """节点是否需要 (重新) 同步 DNS; 供上报钩子快速判断, 避免每次心跳都走全流程"""
+    if not srv.get("dns_managed") or srv.get("cert_mode") != "acme":
+        return False
+    sync = srv.get("dns_sync") or {}
+    now = now or time.time()
+    planned = set()
+    for family, name, _rtype in node_dns_plan(srv):
+        planned.add(family)
+        ip = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
+        ent = sync.get(family) or {}
+        if not ip:
+            if ent.get("state") != "pending":
+                return True
+            continue
+        if ent.get("state") == "ok" and ent.get("ip") == ip and ent.get("name") == name:
+            continue
+        if ent.get("state") == "fail" and now - float(ent.get("at") or 0) < DNS_SYNC_FAIL_RETRY:
+            continue  # 失败防抖
+        return True
+    for family in ("ipv4", "ipv6"):
+        if family not in planned and (sync.get(family) or {}).get("state") not in (None, "off"):
+            return True  # 模式切换后残留的族状态待清理
+    return False
+
+
+def sync_node_dns(base, sid, reason="auto", lock=None):
+    """按 node_dns_plan 把节点 DNS 记录同步到 Cloudflare; 返回 dns_sync 状态 dict。
+    reason: auto=上报触发 (失败防抖) / manual=手动强制。网络调用在锁外, 写回时重新读取合并。"""
+    servers = load_servers(base)
+    srv = servers.get(sid)
+    if not srv:
+        return None
+    sync = dict(srv.get("dns_sync") or {})
+    plan = node_dns_plan(srv)
+    if not srv.get("dns_managed") or srv.get("cert_mode") != "acme" or not plan:
+        return sync
+    s = get_settings(base)
+    token = s.get("cf_api_token") or ""
+    zone_id = s.get("cf_zone_id") or ""
+    now = time.time()
+    dirty = False
+    planned = set()
+    for family, name, rtype in plan:
+        planned.add(family)
+        ip = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
+        ent = dict(sync.get(family) or {})
+        if ip and ent.get("state") == "ok" and ent.get("ip") == ip and ent.get("name") == name:
+            continue  # 已同步且无变化
+        if not ip:
+            new = {"name": name, "ip": "", "state": "pending",
+                   "error": "等待节点上报 %s 地址" % family.upper(),
+                   "at": float(ent.get("at") or now)}
+            if new != ent:
+                sync[family] = new
+                dirty = True
+            continue
+        if (reason != "manual" and ent.get("state") == "fail"
+                and now - float(ent.get("at") or 0) < DNS_SYNC_FAIL_RETRY):
+            continue  # 失败防抖, 避免每次心跳都打 CF
+        if not token:
+            new = {"name": name, "ip": ip, "state": "fail",
+                   "error": "未配置 Cloudflare API Token (请到设置页配置)", "at": now}
+        else:
+            try:
+                zid = cf_find_zone(token, name, zone_id)
+                changes = cf_ensure_record(token, zid, name, rtype, ip)
+                _DNS_CACHE.pop((name, family), None)  # 清解析缓存, 协议族状态尽快就绪
+                new = {"name": name, "ip": ip, "state": "ok", "at": now, "error": "",
+                       "detail": "; ".join(changes) if changes else "已是最新"}
+            except Exception as e:  # noqa: BLE001
+                new = {"name": name, "ip": ip, "state": "fail",
+                       "error": str(e)[:200], "at": now}
+        sync[family] = new
+        dirty = True
+    for family in ("ipv4", "ipv6"):
+        if family not in planned and (sync.get(family) or {}).get("state") not in (None, "off"):
+            sync[family] = {"state": "off", "name": "", "ip": "", "error": "", "at": now}
+            dirty = True
+    if dirty:
+        def _write():
+            cur = load_servers(base)
+            target = cur.get(sid)
+            if not target:
+                return
+            target["dns_sync"] = sync
+            save_servers(base, cur)
+        if lock is not None:
+            with lock:
+                _write()
+        else:
+            _write()
+    return sync
 
 
 def server_users(base, srv):
@@ -1499,6 +1732,7 @@ def cmd_set(args):
                  ("sni", args.sni), ("panel_listen", args.panel_listen),
                  ("panel_port", args.panel_port), ("admin_user", args.admin_user),
                  ("agent_listen", args.agent_listen), ("agent_port", args.agent_port),
+                 ("cf_api_token", args.cf_api_token), ("cf_zone_id", args.cf_zone_id),
                  ("private_action", args.private_action), ("log_level", args.log_level)):
         if v is not None:
             s[k] = v
@@ -1516,7 +1750,7 @@ def cmd_set(args):
         save_json(P["settings"], out)
         print("设置已更新")
     for k in DEFAULT_SETTINGS:
-        if k == "admin_pass_hash":
+        if k in ("admin_pass_hash", "cf_api_token"):
             print("%-15s = %s" % (k, "(已设置)" if s[k] else "(未设置)"))
             continue
         if k == "panel_secret":
@@ -1756,32 +1990,40 @@ def cmd_srv(args):
         token = gen_server_token()
         users = parse_users_arg(base, args.user) if args.user else []
         ip_mode = args.ip_mode
-        cert_mode = args.cert_mode or ("acme" if (args.domain or args.domain6) else "")
+        domain6 = args.domain6
+        if ip_mode == "dual" and args.domain and not domain6:
+            domain6 = derive_v6_domain(args.domain)  # 双栈: IPv6 域名自动派生首段 -v6
+        cert_mode = args.cert_mode or ("acme" if (args.domain or domain6) else "")
         if not cert_mode:
             die("未绑定域名时必须显式选择 --cert-mode selfip 或 unsafe")
-        if args.domain and args.domain6 and args.domain == args.domain6:
+        if args.domain and domain6 and args.domain == domain6:
             die("IPv4 与 IPv6 域名不能相同")
-        if ip_mode == "ipv4" and args.domain6:
+        if ip_mode == "ipv4" and domain6:
             die("仅 IPv4 模式不能配置 --domain6")
         if ip_mode == "ipv6" and args.domain:
             die("仅 IPv6 模式不能配置 --domain")
         if cert_mode == "acme":
             if ip_mode != "ipv6" and not args.domain:
                 die("acme 模式需要 --domain (IPv4 域名)")
-            if ip_mode == "ipv6" and not args.domain6:
+            if ip_mode == "ipv6" and not domain6:
                 die("纯 IPv6 节点需要 --domain6 (IPv6 域名)")
         servers[sid] = {
             "name": args.name, "token_hash": hash_server_token(token),
             "port": args.port,
-            "domain": args.domain or "", "domain6": args.domain6 or "",
+            "domain": args.domain or "", "domain6": domain6 or "",
             "ip_mode": ip_mode, "cert_mode": cert_mode,
             "acme_email": args.acme_email or "",
+            "dns_managed": bool(args.dns_managed and cert_mode == "acme"),
             "users": users, "users_mode": "selected" if users else "all",
             "note": args.note or "", "enabled": True,
             "created_at": int(time.time()),
         }
         save_servers(base, servers)
         print("已添加节点 %s (%s), 证书模式 %s" % (args.name, sid, cert_mode))
+        if domain6:
+            print("IPv6 域名: %s" % domain6)
+        if args.dns_managed and cert_mode == "acme":
+            print("DNS 自动管理: 已开启 (节点上报 IP 后由面板创建/更新 Cloudflare 记录)")
         print("节点 token (仅显示一次): %s" % token)
     elif args.srv_cmd == "del":
         if args.sid not in servers:
@@ -1931,6 +2173,8 @@ def main():
     pa.add_argument("--cert-mode", choices=["acme", "selfip", "unsafe"],
                     help="证书模式: acme=域名正式证书(默认) selfip=IP自签 unsafe=自签(不安全)")
     pa.add_argument("--acme-email", help="ACME 账号邮箱")
+    pa.add_argument("--dns-managed", action="store_true",
+                    help="面板自动管理 Cloudflare DNS (需先 set --cf-api-token)")
     pa.add_argument("--user", action="append", help="只下放指定用户 (可多个/逗号分隔; 默认全部)")
     pa.add_argument("--note", help="备注")
     pa = ss.add_parser("del")
@@ -1961,6 +2205,8 @@ def main():
     p.add_argument("--agent-port", type=int, help="节点 agent 专用 HTTPS 端口 (默认 9443)")
     p.add_argument("--admin-user", help="面板管理员用户名")
     p.add_argument("--admin-pass", help="面板管理员密码 (设置后用于登录面板)")
+    p.add_argument("--cf-api-token", help="Cloudflare API Token (Zone.DNS Edit; 节点 DNS 自动管理)")
+    p.add_argument("--cf-zone-id", help="Cloudflare Zone ID (可选, 留空自动按域名定位)")
     p.set_defaults(fn=cmd_set)
 
     p = sub.add_parser("gen", help="生成 sing-box 配置")

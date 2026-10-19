@@ -49,6 +49,32 @@
       </div>
 
       <div class="card">
+        <h3 class="card-title">Cloudflare DNS 自动管理</h3>
+        <div class="form-grid">
+          <Input
+            v-model="cfToken"
+            label="API Token"
+            type="password"
+            :placeholder="cfTokenSet ? '已配置 · 输入以更换' : '未配置'"
+            hint="需 Zone.DNS Edit 权限；只保存在中控，节点只上报 IP，记录由中控创建"
+          />
+          <Input
+            v-model="form.cf_zone_id"
+            label="Zone ID (可选)"
+            hint="留空则按域名逐级自动定位所属 Zone；多域名不同 Zone 时必须留空"
+            placeholder="32 位十六进制"
+          />
+        </div>
+        <div class="row foot">
+          <span class="muted note">
+            添加 acme 节点时开启「自动 DNS」后，节点安装上报 IP 即自动创建 A / AAAA 记录（v6 用首段加 -v6 的独立域名），随后自动申请证书。
+          </span>
+          <Button v-if="cfTokenSet" small variant="danger" :loading="cfTesting" @click="clearCfToken">清除 Token</Button>
+          <Button small :loading="cfTesting" @click="testCfToken">测试 Token</Button>
+        </div>
+      </div>
+
+      <div class="card">
         <h3 class="card-title">管理员账号</h3>
         <div class="form-grid">
           <Input v-model="adminForm.old_password" label="原密码" type="password" placeholder="必填" />
@@ -72,6 +98,7 @@ import Select from '@/component/ui/Select.vue'
 import Spinner from '@/component/ui/Spinner.vue'
 import Toggle from '@/component/ui/Toggle.vue'
 import { get, post, put } from '@/util/request'
+import { confirmDialog } from '@/util/confirm'
 import { toast } from '@/util/toast'
 import { auth, login } from '@/util/auth'
 import { LOG_LEVELS, type NodeInfo, type Settings } from '@/types'
@@ -94,7 +121,11 @@ const form = reactive({
   sub_host: '',
   sub_path: 'sub',
   sub_port: 0,
+  cf_zone_id: '',
 })
+const cfToken = ref('')
+const cfTokenSet = ref(false)
+const cfTesting = ref(false)
 
 const adminForm = reactive({
   old_password: '',
@@ -128,7 +159,10 @@ async function load() {
       sub_host: subHost,
       sub_path: s.sub_path || 'sub',
       sub_port: s.sub_port ?? 0,
+      cf_zone_id: s.cf_zone_id || '',
     })
+    cfTokenSet.value = !!s.cf_token_set
+    cfToken.value = ''
     adminUser.value = s.admin_user
     adminForm.new_username = s.admin_user
     nodeTags.value = Object.keys(nd).sort()
@@ -143,18 +177,51 @@ async function save() {
   saving.value = true
   try {
     const subHost = form.sub_host.trim()
-    await put('/api/settings', {
+    const body: Record<string, unknown> = {
       ...form,
       host: subHost,
       sub_host: subHost,
       panel_port: Number(form.panel_port),
       sub_port: Number(form.sub_port) || 0,
-    })
+    }
+    if (cfToken.value.trim()) body.cf_api_token = cfToken.value.trim() // 只写不回显: 空 = 不修改
+    await put('/api/settings', body)
+    if (cfToken.value.trim()) {
+      cfTokenSet.value = true
+      cfToken.value = ''
+    }
     toast('设置已保存，等待节点同步', 'success')
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
     saving.value = false
+  }
+}
+
+async function testCfToken() {
+  cfTesting.value = true
+  try {
+    const r = await post<{ ok: boolean; error?: string }>('/api/settings/cf_test', {
+      token: cfToken.value.trim() || undefined,
+    })
+    if (r.ok) toast('Token 有效', 'success')
+    else toast(`Token 无效: ${r.error || ''}`, 'error')
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  } finally {
+    cfTesting.value = false
+  }
+}
+
+async function clearCfToken() {
+  if (!(await confirmDialog('清除 Cloudflare API Token？\n已开启自动 DNS 的节点将停止同步记录（已有记录保留）。'))) return
+  try {
+    await put('/api/settings', { cf_api_token: '' })
+    cfTokenSet.value = false
+    cfToken.value = ''
+    toast('已清除 Cloudflare Token', 'success')
+  } catch (e) {
+    toast((e as Error).message, 'error')
   }
 }
 
