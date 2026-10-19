@@ -20,7 +20,24 @@
     <h4 class="add-title">添加规则</h4>
     <div class="form-grid">
       <div class="fw">
-        <MultiSelect v-model="form.rule_set" :options="rulesetTags" label="规则集" hint="不选 = 不匹配规则集" />
+        <span class="lbl">规则集<i class="hint">搜索选择；未下载项点击后自动下载</i></span>
+        <div v-if="form.rule_set.length" style="margin-bottom: 6px">
+          <span v-for="s in form.rule_set" :key="s" class="chip purple">
+            {{ s }}
+            <b class="x" @click="form.rule_set = form.rule_set.filter((x) => x !== s)">×</b>
+          </span>
+        </div>
+        <input v-model="setSearch" class="rs-input" placeholder="搜索规则集，如 geosite-cn" @input="searchSets" />
+        <div v-if="setResults.length" class="rs-list">
+          <div v-for="r in setResults" :key="r.tag" class="rs-item" @click="pickSet(r)">
+            <span class="mono">{{ r.tag }}</span>
+            <span class="row" style="gap: 6px">
+              <Badge v-if="downloading === r.tag" color="yellow">下载中…</Badge>
+              <Badge v-else-if="r.downloaded === false" color="yellow">未下载</Badge>
+              <Badge color="dim">{{ r.source }}</Badge>
+            </span>
+          </div>
+        </div>
       </div>
       <Input v-model="form.domain" label="域名" hint="逗号分隔" placeholder="example.com, google.com" />
       <Input v-model="form.domain_suffix" label="域名后缀" hint="逗号分隔" placeholder="google.com" />
@@ -45,7 +62,6 @@ import Badge from '@/component/ui/Badge.vue'
 import Button from '@/component/ui/Button.vue'
 import Empty from '@/component/ui/Empty.vue'
 import Input from '@/component/ui/Input.vue'
-import MultiSelect from '@/component/ui/MultiSelect.vue'
 import Select from '@/component/ui/Select.vue'
 import Spinner from '@/component/ui/Spinner.vue'
 import Toggle from '@/component/ui/Toggle.vue'
@@ -61,10 +77,13 @@ const props = defineProps<{
 
 const rules = ref<RouteRule[]>([])
 const nodeTags = ref<string[]>([])
-const rulesetTags = ref<string[]>([])
 const servers = ref<ServerItem[]>([])
 const loading = ref(true)
 const saving = ref(false)
+const setSearch = ref('')
+const setResults = ref<RulesetItem[]>([])
+const downloading = ref('')
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 
 const form = reactive({
   rule_set: [] as string[],
@@ -114,21 +133,58 @@ function condText(r: RouteRule): string[] {
 async function load() {
   loading.value = true
   try {
-    const [rc, nd, rs, sv] = await Promise.all([
+    const [rc, nd, sv] = await Promise.all([
       get<RoutesData>('/api/routes'),
       get<Record<string, NodeInfo>>('/api/nodes'),
-      get<{ total: number; results: RulesetItem[] }>('/api/rulesets'),
       get<ServerItem[]>('/api/servers'),
     ])
     rules.value = rc.rules
     nodeTags.value = Object.keys(nd).sort()
-    rulesetTags.value = rs.results.map((x) => x.tag)
     servers.value = sv
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
     loading.value = false
   }
+}
+
+function searchSets() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(async () => {
+    const q = setSearch.value.trim()
+    if (!q) {
+      setResults.value = []
+      return
+    }
+    try {
+      const r = await get<{ results: RulesetItem[] }>(`/api/rulesets?q=${encodeURIComponent(q)}`)
+      setResults.value = r.results.filter((x) => !form.rule_set.includes(x.tag)).slice(0, 20)
+    } catch {
+      /* 搜索失败静默 */
+    }
+  }, 250)
+}
+
+async function pickSet(r: RulesetItem) {
+  if (downloading.value) return
+  if (r.downloaded === false) {
+    downloading.value = r.tag
+    try {
+      const res = await post<{ ok: string[]; fail: Record<string, string> }>('/api/rulesets/download', { tags: [r.tag] })
+      if (res.fail && res.fail[r.tag]) {
+        toast(`下载失败: ${res.fail[r.tag]}`, 'error')
+        return
+      }
+      toast(`规则集 ${r.tag} 已下载`, 'success')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      return
+    } finally {
+      downloading.value = ''
+    }
+  }
+  if (!form.rule_set.includes(r.tag)) form.rule_set = [...form.rule_set, r.tag]
+  setResults.value = setResults.value.filter((x) => x.tag !== r.tag)
 }
 
 function splitCsv(text: string): string[] {
@@ -162,7 +218,7 @@ async function addRule() {
   saving.value = true
   try {
     await post('/api/routes', body)
-    toast('规则已添加，已自动下发到相关节点', 'success')
+    toast('规则已添加，等待节点同步', 'success')
     Object.assign(form, {
       rule_set: [],
       domain: '',
@@ -186,7 +242,7 @@ async function delRule(index: number) {
   if (!(await confirmDialog(`确定删除第 ${index + 1} 条规则？`))) return
   try {
     await httpDel(`/api/routes/${index}`)
-    toast('已删除，已自动下发到相关节点', 'success')
+    toast('已删除，等待节点同步', 'success')
     load()
   } catch (e) {
     toast((e as Error).message, 'error')
@@ -225,6 +281,63 @@ onMounted(load)
 
 .fw {
   grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lbl {
+  font-size: 12.5px;
+  color: var(--c-text-dim);
+  font-weight: 500;
+}
+
+.hint {
+  font-style: normal;
+  margin-left: 6px;
+  opacity: 0.75;
+  font-weight: 400;
+}
+
+.rs-input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--c-border);
+  background: var(--c-inset);
+  color: var(--c-text);
+  font-size: 13.5px;
+  font-family: var(--font);
+  outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.rs-input:focus {
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
+}
+
+.rs-list {
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-inset);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.rs-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12.5px;
+  transition: background-color 0.12s var(--ease);
+}
+
+.rs-item:hover {
+  background: var(--c-primary-soft);
 }
 
 .field-row {

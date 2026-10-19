@@ -6,7 +6,7 @@
       <Button small @click="load" :loading="loading">刷新</Button>
       <Button variant="primary" @click="openAdd">添加节点</Button>
     </div>
-    <p class="page-sub">节点通过一键命令接入；配置变更实时（秒级）自动下发到相关节点并生效，无需手动应用。</p>
+    <p class="page-sub">节点通过一键命令接入；配置保存后由节点自动拉取，hash 一致才显示「已同步」。</p>
 
     <div class="card">
       <Spinner v-if="loading && !servers.length" />
@@ -33,11 +33,20 @@
                 <Badge>{{ s.name }}</Badge>
                 <div class="mono faint sid">{{ s.sid }}</div>
               </td>
-              <td class="mono">
-                <template v-if="s.cert_mode === 'acme'">
-                  <Badge color="green" style="margin-right: 6px">域名</Badge>{{ s.domain }}:{{ s.port }}
+              <td>
+                <template v-if="s.ip_status">
+                  <div v-for="f in (['ipv4', 'ipv6'] as const)" :key="f" class="addr-fam">
+                    <span class="fam-tag mono">{{ f === 'ipv4' ? 'v4' : 'v6' }}</span>
+                    <span v-if="!s.ip_status[f].enabled" class="faint">已停用</span>
+                    <span v-else-if="s.ip_status[f].active" class="mono">{{ s.ip_status[f].address }}:{{ s.port }}</span>
+                    <span
+                      v-else-if="s.ip_status[f].reported_ip && s.ip_status[f].error"
+                      class="fam-warn"
+                      :title="`上报 ${s.ip_status[f].reported_ip} · ${s.ip_status[f].error}`"
+                    >⚠ {{ famWarnText(s, f) }}</span>
+                    <span v-else class="muted">{{ s.ip_status[f].error || '等待上报' }}</span>
+                  </div>
                 </template>
-                <template v-else-if="s.reported_ip">{{ s.reported_ip }}:{{ s.port }}</template>
                 <span v-else class="muted">待上报</span>
               </td>
               <td>
@@ -59,7 +68,8 @@
                 <div v-if="s.last_error" class="last-err" :title="s.last_error">⚠ {{ truncate(s.last_error, 40) }}</div>
               </td>
               <td>
-                <Badge v-if="!s.users?.length" color="dim">全部</Badge>
+                <Badge v-if="s.users_mode === 'none'" color="red">无用户</Badge>
+                <Badge v-else-if="s.users_mode === 'all'" color="dim">全部</Badge>
                 <Badge v-else color="cyan" :title="s.users.join('\n')" style="cursor: default">{{ s.users.length }} 人</Badge>
               </td>
               <td class="mono">↑{{ fmtBytes(s.traffic?.up) }} ↓{{ fmtBytes(s.traffic?.down) }}</td>
@@ -84,9 +94,23 @@
       <div class="form-grid">
         <Input v-model="form.name" label="名称" placeholder="如 香港-01" />
         <Input v-model.number="form.port" label="端口" type="number" placeholder="18443" />
+        <Select v-model="form.ip_mode" label="网络模式" :options="IP_MODES" />
         <Select v-model="form.cert_mode" label="证书模式" :options="CERT_MODES" />
         <template v-if="form.cert_mode === 'acme'">
-          <Input v-model="form.domain" label="域名" hint="请先将域名 A 记录解析到该节点 IP, 并放行 80 端口用于验证" placeholder="node1.example.com" />
+          <Input
+            v-if="form.ip_mode !== 'ipv6'"
+            v-model="form.domain"
+            label="IPv4 域名"
+            hint="需要 A 记录解析到该节点 IPv4, 并放行 80 端口用于验证"
+            placeholder="node1.example.com"
+          />
+          <Input
+            v-if="form.ip_mode !== 'ipv4'"
+            v-model="form.domain6"
+            label="IPv6 域名"
+            :hint="form.ip_mode === 'dual' ? '需要 AAAA 记录; 双栈可后补, 未就绪时自动暂停 IPv6 入口' : '需要 AAAA 记录解析到该节点 IPv6, 并放行 80 端口用于验证'"
+            placeholder="node1-v6.example.com"
+          />
           <Input v-model="form.acme_email" label="ACME 邮箱" hint="可选" placeholder="admin@example.com" />
         </template>
         <p v-else-if="form.cert_mode === 'selfip'" class="muted cert-tip">
@@ -97,8 +121,12 @@
           <p class="muted" style="margin: 6px 0 0; font-size: 12.5px">不申请可信证书，仅建议临时调试使用。</p>
         </div>
         <div class="fw">
-          <MultiSelect v-model="form.users" :options="userNames" label="下放用户" hint="不选 = 全部用户" />
+          <Select v-model="form.users_mode" label="用户分配" :options="USER_MODES" />
         </div>
+        <div v-if="form.users_mode === 'selected'" class="fw">
+          <MultiSelect v-model="form.users" :options="userNames" label="指定用户" hint="仅所选用户可使用此节点" />
+        </div>
+        <p v-else-if="form.users_mode === 'none'" class="muted cert-tip">此节点不下发任何用户，仅保留节点与配置。</p>
         <Input v-model="form.note" label="备注" placeholder="可留空" />
       </div>
       <template #footer>
@@ -141,7 +169,7 @@
       <Spinner v-if="cfgLoading" />
       <template v-else-if="cfg">
         <div class="kv"><span class="k">配置 hash</span><span class="v mono">{{ cfg.hash.slice(0, 16) }}…</span></div>
-        <div class="kv" style="margin-bottom: 12px"><span class="k">关联规则集</span><span class="v">{{ cfg.rulesets.length ? cfg.rulesets.join(', ') : '无' }}</span></div>
+        <div class="kv" style="margin-bottom: 12px"><span class="k">关联规则集</span><span class="v">{{ cfg.rulesets.length ? cfg.rulesets.map((r) => r.tag).join(', ') : '无' }}</span></div>
         <CodeBox :text="cfgText" multiline />
       </template>
       <template #footer>
@@ -152,7 +180,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import Badge from '@/component/ui/Badge.vue'
 import Button from '@/component/ui/Button.vue'
 import Drawer from '@/component/ui/Drawer.vue'
@@ -178,6 +206,17 @@ const CERT_MODES = [
   { label: '不安全模式 (自签)', value: 'unsafe' },
 ]
 
+const IP_MODES = [
+  { label: '双栈 (IPv4 + IPv6)', value: 'dual' },
+  { label: '仅 IPv4', value: 'ipv4' },
+  { label: '纯 IPv6', value: 'ipv6' },
+]
+const USER_MODES = [
+  { label: '全部用户', value: 'all' },
+  { label: '指定用户', value: 'selected' },
+  { label: '无用户（暂停下放）', value: 'none' },
+]
+
 const servers = ref<ServerItem[]>([])
 const userNames = ref<string[]>([])
 const loading = ref(true)
@@ -189,13 +228,25 @@ const saving = ref(false)
 const form = reactive({
   name: '',
   port: 18443,
+  ip_mode: 'dual' as 'dual' | 'ipv4' | 'ipv6',
   cert_mode: 'selfip' as 'acme' | 'selfip' | 'unsafe',
   domain: '',
+  domain6: '',
   acme_email: '',
   unsafe_ok: false,
+  users_mode: 'all' as 'all' | 'selected' | 'none',
   users: [] as string[],
   note: '',
 })
+
+// 切换网络模式时清空不适用的域名
+watch(
+  () => form.ip_mode,
+  (m) => {
+    if (m === 'ipv4') form.domain6 = ''
+    if (m === 'ipv6') form.domain = ''
+  },
+)
 
 const installVisible = ref(false)
 const installCmd = ref('')
@@ -239,19 +290,29 @@ function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + '…' : text
 }
 
+function famWarnText(s: ServerItem, f: 'ipv4' | 'ipv6'): string {
+  const err = s.ip_status?.[f]?.error || ''
+  if (f === 'ipv6') return `IPv6 已检测到，但 ${err}，已暂停 IPv6 入口`
+  return `IPv4 异常: ${err}`
+}
+
 async function load() {
   loading.value = true
   try {
-    const [sv, us] = await Promise.all([
-      get<ServerItem[]>('/api/servers'),
-      get<UserInfo[]>('/api/users'),
-    ])
-    servers.value = sv
-    userNames.value = us.map((u) => u.name)
+    servers.value = await get<ServerItem[]>('/api/servers')
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
     loading.value = false
+  }
+}
+
+async function ensureUsers() {
+  try {
+    const us = await get<UserInfo[]>('/api/users')
+    userNames.value = us.map((u) => u.name)
+  } catch (e) {
+    toast((e as Error).message, 'error')
   }
 }
 
@@ -260,13 +321,17 @@ function openAdd() {
   Object.assign(form, {
     name: '',
     port: 18443,
+    ip_mode: 'dual',
     cert_mode: 'selfip',
     domain: '',
+    domain6: '',
     acme_email: '',
     unsafe_ok: false,
+    users_mode: 'all',
     users: [],
     note: '',
   })
+  ensureUsers()
   editVisible.value = true
 }
 
@@ -275,13 +340,17 @@ function openEdit(s: ServerItem) {
   Object.assign(form, {
     name: s.name,
     port: s.port,
-    cert_mode: s.cert_mode || (s.domain ? 'acme' : 'selfip'),
+    ip_mode: s.ip_mode || 'dual',
+    cert_mode: s.cert_mode || (s.domain || s.domain6 ? 'acme' : 'selfip'),
     domain: s.domain,
+    domain6: s.domain6 || '',
     acme_email: s.acme_email,
     unsafe_ok: false,
+    users_mode: s.users_mode,
     users: [...(s.users || [])],
     note: s.note,
   })
+  ensureUsers()
   editVisible.value = true
 }
 
@@ -295,15 +364,32 @@ async function save() {
     toast('端口需为 1-65535 的数字', 'error')
     return
   }
-  if (form.cert_mode === 'acme' && !form.domain.trim()) {
-    toast('acme 模式需要绑定域名', 'error')
-    return
+  if (form.cert_mode === 'acme') {
+    const d4 = form.domain.trim()
+    const d6 = form.domain6.trim()
+    if (form.ip_mode !== 'ipv6' && !d4) {
+      toast('acme 模式需要配置 IPv4 域名', 'error')
+      return
+    }
+    if (form.ip_mode === 'ipv6' && !d6) {
+      toast('纯 IPv6 节点需要配置 IPv6 域名', 'error')
+      return
+    }
+    if (d4 && d6 && d4.toLowerCase() === d6.toLowerCase()) {
+      toast('IPv4 与 IPv6 域名不能相同', 'error')
+      return
+    }
   }
   if (form.cert_mode === 'unsafe' && !form.unsafe_ok) {
     toast('请先勾选确认了解不安全模式的风险', 'error')
     return
   }
-  const domain = form.cert_mode === 'acme' ? form.domain.trim() : ''
+  if (form.users_mode === 'selected' && !form.users.length) {
+    toast('请选择至少一个用户，或把用户分配改为「无用户」', 'error')
+    return
+  }
+  const domain = form.cert_mode === 'acme' && form.ip_mode !== 'ipv6' ? form.domain.trim() : ''
+  const domain6 = form.cert_mode === 'acme' && form.ip_mode !== 'ipv4' ? form.domain6.trim() : ''
   const acmeEmail = form.cert_mode === 'acme' ? form.acme_email.trim() : ''
   saving.value = true
   try {
@@ -311,23 +397,30 @@ async function save() {
       const body: Record<string, unknown> = {
         name: form.name.trim(),
         port,
-        users: form.users,
+        ip_mode: form.ip_mode,
+        users_mode: form.users_mode,
         note: form.note,
         enabled: editing.value.enabled,
         cert_mode: form.cert_mode,
         domain,
+        domain6,
         acme_email: acmeEmail,
       }
+      if (form.users_mode === 'selected') body.users = form.users
       if (form.cert_mode === 'unsafe') body.unsafe_ok = true
       await put(`/api/servers/${editing.value.sid}`, body)
-      toast('节点已更新，已自动下发到相关节点', 'success')
+      toast('节点已更新，等待节点同步', 'success')
       editVisible.value = false
     } else {
-      const body: Record<string, unknown> = { name: form.name.trim(), port, cert_mode: form.cert_mode }
+      const body: Record<string, unknown> = {
+        name: form.name.trim(), port, cert_mode: form.cert_mode, users_mode: form.users_mode,
+        ip_mode: form.ip_mode,
+      }
       if (domain) body.domain = domain
+      if (domain6) body.domain6 = domain6
       if (acmeEmail) body.acme_email = acmeEmail
       if (form.cert_mode === 'unsafe') body.unsafe_ok = true
-      if (form.users.length) body.users = form.users
+      if (form.users_mode === 'selected') body.users = form.users
       if (form.note) body.note = form.note
       const r = await post<ServerCreated>('/api/servers', body)
       editVisible.value = false
@@ -346,6 +439,7 @@ async function toggleEnable(s: ServerItem, enabled: boolean) {
     await put(`/api/servers/${s.sid}`, { enabled })
     s.enabled = enabled
     toast(enabled ? `已启用 ${s.name}` : `已禁用 ${s.name}`, 'success')
+    await load()
   } catch (e) {
     toast((e as Error).message, 'error')
   }
@@ -405,7 +499,9 @@ async function del(s: ServerItem) {
 
 onMounted(() => {
   load()
-  timer = setInterval(load, 20000)
+  timer = setInterval(() => {
+    if (!document.hidden) load()
+  }, 20000)
 })
 
 onUnmounted(() => clearInterval(timer))
@@ -415,6 +511,32 @@ onUnmounted(() => clearInterval(timer))
 .sid {
   font-size: 11.5px;
   margin-top: 3px;
+}
+
+.addr-fam {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.addr-fam + .addr-fam {
+  margin-top: 3px;
+}
+
+.fam-tag {
+  color: var(--c-text-faint);
+  width: 16px;
+  flex-shrink: 0;
+}
+
+.fam-warn {
+  color: var(--c-yellow);
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
 }
 
 .cert-exp {

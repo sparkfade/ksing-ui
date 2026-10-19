@@ -197,7 +197,7 @@
     <!-- 续期 -->
     <Modal v-model:visible="renewVisible" :title="`续期 · ${current?.name ?? ''}`">
       <Input v-model.number="renewDays" label="顺延天数" hint="从当前到期时间（已过期则从现在）顺延" type="number" placeholder="30" />
-      <p class="muted" style="margin: 10px 0 0; font-size: 12.5px">保存后实时生效，秒级下发到相关节点。</p>
+      <p class="muted" style="margin: 10px 0 0; font-size: 12.5px">保存后由节点自动拉取生效。</p>
       <template #footer>
         <Button @click="renewVisible = false">取消</Button>
         <Button variant="primary" :loading="renewing" @click="doRenew">续期</Button>
@@ -372,8 +372,8 @@ function quotaFields(gb: number | string, local: string, day: number | string): 
   }
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     const [us, sv, nd] = await Promise.all([
       get<UserInfo[]>('/api/users'),
@@ -386,8 +386,14 @@ async function load() {
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
+}
+
+function rebindCurrent() {
+  const name = current.value?.name
+  if (!name) return
+  current.value = users.value.find((x) => x.name === name) ?? current.value
 }
 
 function toggleReveal(name: string) {
@@ -402,6 +408,8 @@ async function toggleEnable(u: UserInfo, enable: boolean) {
     await put(`/api/users/${encodeURIComponent(u.name)}`, { enable })
     u.enable = enable
     toast(enable ? `已启用 ${u.name}` : `已禁用 ${u.name}`, 'success')
+    await load(true)
+    rebindCurrent()
   } catch (e) {
     toast((e as Error).message, 'error')
   }
@@ -427,7 +435,9 @@ async function addUser() {
     const r = await post<{ ok: boolean; password: string }>('/api/users', body)
     toast(`用户已创建，AnyTLS 密码: ${r.password}`, 'success')
     addVisible.value = false
-    load()
+    await load(true)
+    const created = users.value.find((x) => x.name === addForm.name.trim())
+    if (created) openLink(created)
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -437,7 +447,7 @@ async function addUser() {
 
 function openLink(u: UserInfo) {
   current.value = u
-  serverSel.value = [...(u.servers || [])]
+  serverSel.value = [...(u.assigned_servers || u.servers || [])]
   linkVisible.value = true
 }
 
@@ -447,8 +457,9 @@ async function saveServers() {
   savingServers.value = true
   try {
     await put(`/api/users/${encodeURIComponent(u.name)}/servers`, { servers: serverSel.value })
-    u.servers = [...serverSel.value]
-    toast('可见节点已保存，已自动下发到相关节点', 'success')
+    toast('可见节点已保存，等待节点同步', 'success')
+    await load(true)
+    rebindCurrent()
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -480,7 +491,7 @@ async function saveFinal() {
   try {
     await post('/api/routes/final', { user: u.name, outbound: ufOutbound.value })
     userFinal.value = ufOutbound.value
-    toast('专属出口已保存，已自动下发到相关节点', 'success')
+    toast('专属出口已保存，等待节点同步', 'success')
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -497,7 +508,7 @@ async function delFinal() {
     await httpDel('/api/routes/final', { user: u.name })
     userFinal.value = ''
     ufOutbound.value = 'direct'
-    toast('已删除，已自动下发到相关节点', 'success')
+    toast('已删除，等待节点同步', 'success')
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -548,7 +559,7 @@ async function saveEdit() {
     await put(`/api/users/${encodeURIComponent(u.name)}`, body)
     toast('已保存', 'success')
     editVisible.value = false
-    load()
+    load(true)
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -560,8 +571,9 @@ async function resetSub(u: UserInfo) {
   if (!(await confirmDialog(`重置用户「${u.name}」的订阅地址？\n旧订阅地址立即失效，需重新分发。`))) return
   try {
     await put(`/api/users/${encodeURIComponent(u.name)}`, { refresh_token: true })
-    toast('订阅已重置，已自动下发到相关节点', 'success')
-    load()
+    toast('订阅已重置，等待节点同步', 'success')
+    await load(true)
+    rebindCurrent()
   } catch (e) {
     toast((e as Error).message, 'error')
   }
@@ -575,8 +587,9 @@ async function resetUsage(u: UserInfo) {
   if (!(await confirmDialog(`重置用户「${u.name}」的当前周期流量？\n流量清零并恢复使用。`))) return
   try {
     await post(`/api/users/${encodeURIComponent(u.name)}/reset_usage`)
-    toast('流量已重置，已自动下发到相关节点', 'success')
-    load()
+    toast('流量已重置，等待节点同步', 'success')
+    load(true)
+    rebindCurrent()
   } catch (e) {
     toast((e as Error).message, 'error')
   }
@@ -599,9 +612,9 @@ async function doRenew() {
   renewing.value = true
   try {
     await put(`/api/users/${encodeURIComponent(u.name)}`, { renew_days: days })
-    toast(`已为 ${u.name} 续期 ${days} 天，已自动下发到相关节点`, 'success')
+    toast(`已为 ${u.name} 续期 ${days} 天，等待节点同步`, 'success')
     renewVisible.value = false
-    load()
+    load(true)
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {
@@ -614,7 +627,7 @@ async function del(u: UserInfo) {
   try {
     await httpDel(`/api/users/${encodeURIComponent(u.name)}`)
     toast('已删除', 'success')
-    load()
+    load(true)
   } catch (e) {
     toast((e as Error).message, 'error')
   }
@@ -715,5 +728,16 @@ onMounted(load)
 
 .field-wide {
   grid-column: 1 / -1;
+}
+
+@media (max-width: 767px) {
+  .sub-line {
+    flex-wrap: wrap;
+  }
+
+  .sub-box {
+    flex-basis: 100%;
+    order: 3;
+  }
 }
 </style>

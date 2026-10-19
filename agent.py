@@ -15,9 +15,11 @@ ksing-ui 节点 agent (纯 Python 标准库, 无需第三方依赖)
 """
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -26,6 +28,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # 服务器常见 C/POSIX locale 会把 stdout 切成 latin-1, 中文日志会崩; 强制 UTF-8
@@ -35,7 +38,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.2.4"
+VERSION = "1.4.0"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -56,6 +59,8 @@ STATS = _C.get("stats", "127.0.0.1:18899")
 PULL_INTERVAL = int(_C.get("pull_interval", 30))
 PUSH_INTERVAL = int(_C.get("push_interval", 10))
 STATE_PATH = os.path.join(DIR, "agent-state.json")
+PENDING_PATH = os.path.join(DIR, "agent-pending.json")  # 未获面板确认的流量增量与目标累计值
+BASELINE_PATH = os.path.join(DIR, "agent-baseline.json")  # 面板已确认的 core 累计计数器基线
 RULESET_DIR = os.path.join(DIR, "rulesets")
 HEALTH = {"ok_at": time.time()}  # 看门狗: 面板通信连续失败则退出让 systemd 重启
 LAST_ERROR = [""]  # 最近一次错误, 随上报带给面板 (列表包一层便于跨线程改写)
@@ -81,7 +86,7 @@ SSL_CTX = make_ssl_ctx()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """面板不做重定向; 拒绝跳转避免 Bearer token 被带往第三方"""
+    """禁止重定向: 避免节点凭据或公网 IP 查询被带往第三方"""
 
     def redirect_request(self, *args, **kwargs):
         return None
@@ -91,6 +96,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                       _NoRedirect(),
                                       urllib.request.HTTPSHandler(context=SSL_CTX))
+# 公网 IP 查询独立通道: 不使用面板 CA, 也不继承环境代理/重定向
+_PUBLIC_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
 def api(method, path, body=None, timeout=30):
@@ -276,11 +283,12 @@ def decode_query_stats_response(msg):
 
 
 def query_traffic():
-    """查询并重置计数器, 返回 {user: [up, down]} 增量"""
+    """读取 core 累计计数器(不 reset), 返回 {user: [up, down]}。
+    非破坏式读取消除了 reset 后到 pending 落盘前的丢账窗口。"""
     host, port = STATS.rsplit(":", 1)
     data = grpc_call(host, int(port),
                      "/v2ray.core.app.stats.command.StatsService/QueryStats",
-                     encode_query_stats_request("", True))
+                     encode_query_stats_request("", False))
     if len(data) < 5 or data[0] != 0:
         raise H2Error("gRPC 响应为空或被压缩")
     ln = int.from_bytes(data[1:5], "big")
@@ -312,6 +320,61 @@ def save_state(state):
     os.replace(tmp, STATE_PATH)
 
 
+def load_pending():
+    try:
+        with open(PENDING_PATH, "r", encoding="utf-8") as f:
+            p = json.load(f)
+        if isinstance(p.get("id"), str) and isinstance(p.get("stats"), dict):
+            return p
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_pending(p):
+    tmp = PENDING_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(p, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, PENDING_PATH)
+
+
+def clear_pending():
+    try:
+        os.remove(PENDING_PATH)
+    except OSError:
+        pass
+
+
+def load_baseline():
+    try:
+        with open(BASELINE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_baseline(counters):
+    tmp = BASELINE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(counters, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, BASELINE_PATH)
+
+
+def traffic_delta(baseline, current):
+    """累计值差分; core 重启导致计数器回退时, 从回退后的当前值重新计起"""
+    delta = {}
+    for name, pair in current.items():
+        old = baseline.get(name, [0, 0])
+        up = pair[0] if pair[0] < old[0] else pair[0] - old[0]
+        down = pair[1] if pair[1] < old[1] else pair[1] - old[1]
+        if up > 0 or down > 0:
+            delta[name] = [up, down]
+    return delta
+
+
 def sync_rulesets(metas):
     os.makedirs(RULESET_DIR, exist_ok=True)
     for m in metas:
@@ -323,7 +386,7 @@ def sync_rulesets(metas):
                     continue
         except OSError:
             pass
-        data = api("GET", "/agent/ruleset/" + m["tag"], timeout=120)
+        data = api("GET", "/agent/ruleset/" + urllib.parse.quote(m["tag"], safe=""), timeout=120)
         if hashlib.sha256(data).hexdigest() != m["sha256"]:
             raise RuntimeError("规则集 %s 校验和不匹配" % m["tag"])
         tmp = fp + ".tmp"
@@ -436,12 +499,13 @@ def ensure_cert_files(cfg):
     meta = api_json("GET", "/agent/node-meta")
     mode = meta.get("cert_mode", "unsafe")
     sni = meta.get("sni") or "anytls.example.com"
-    ip = query_public_ip() if mode == "selfip" else ""
-    subj = ip or sni
+    ips = query_public_ips() if mode == "selfip" else {"ipv4": "", "ipv6": ""}
+    subj = ips["ipv4"] or ips["ipv6"] or sni
     cmd = ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
            "-nodes", "-days", "3650", "-subj", "/CN=%s" % subj]
-    if mode == "selfip" and ip:
-        cmd += ["-addext", "subjectAltName=IP:%s" % ip]
+    sans = [ip for ip in (ips["ipv4"], ips["ipv6"]) if ip]
+    if sans:
+        cmd += ["-addext", "subjectAltName=" + ",".join("IP:%s" % ip for ip in sans)]
     cmd += ["-keyout", key, "-out", cert]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -450,17 +514,55 @@ def ensure_cert_files(cfg):
     log("已补生成节点证书 (mode=%s, CN=%s)" % (mode, subj))
 
 
+_PUBLIC_ENDPOINTS = {
+    "ipv4": ("https://ipv4.icanhazip.com", "https://api.ipify.org"),
+    "ipv6": ("https://ipv6.icanhazip.com", "https://api6.ipify.org"),
+}
+
+
+def query_public_ips():
+    """分别探测公网 IPv4/IPv6; 仅接受全球单播地址, 不走代理/重定向"""
+    out = {"ipv4": "", "ipv6": ""}
+    for family, urls in _PUBLIC_ENDPOINTS.items():
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+                with _PUBLIC_OPENER.open(req, timeout=10) as r:
+                    ip = r.read(256).decode("ascii", "ignore").strip()
+                addr = ipaddress.ip_address(ip)
+                if addr.is_global and (addr.version == 4) == (family == "ipv4"):
+                    out[family] = str(addr)
+                    break
+            except (OSError, ValueError, urllib.error.URLError):
+                continue
+    return out
+
+
 def query_public_ip():
-    for url in ("https://ifconfig.me", "https://api.ipify.org"):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                ip = r.read().decode().strip()
-            if re.fullmatch(r"[0-9.]{7,45}", ip):
-                return ip
-        except Exception:  # noqa: BLE001
-            continue
-    return ""
+    return query_public_ips()["ipv4"]
+
+
+_PUBLIC_IPS = {"value": {"ipv4": "", "ipv6": ""}, "at": 0.0}
+
+
+def cached_public_ips():
+    """低频获取公网 IPv4/IPv6; 失败时保留各族上次成功值, 避免反代回环地址污染链接"""
+    now = time.time()
+    cur = _PUBLIC_IPS["value"]
+    ttl = 6 * 3600 if (cur["ipv4"] or cur["ipv6"]) else 600
+    if _PUBLIC_IPS["at"] and now - _PUBLIC_IPS["at"] < ttl:
+        return dict(cur)
+    got = query_public_ips()
+    _PUBLIC_IPS["at"] = now
+    for family in ("ipv4", "ipv6"):
+        if got[family]:
+            cur[family] = got[family]
+    return dict(cur)
+
+
+def cached_public_ip():
+    ips = cached_public_ips()
+    return ips["ipv4"] or ips["ipv6"]
 
 
 def self_update(resp):
@@ -579,20 +681,41 @@ def cert_info():
 
 
 def report(state):
-    stats = {}
-    for attempt in (0, 1):
-        try:
-            stats = query_traffic()
-            break
-        except OSError as e:
-            # sing-box 刚重启时统计端口尚未就绪, 等 3 秒重试一次
-            if attempt == 0:
-                time.sleep(3)
-            else:
+    pending = load_pending()
+    report_id = pending["id"] if pending else ""
+    target = pending.get("target") if pending else None
+    if pending:
+        # 上轮未获确认: 重试同一 ID/增量; core 新流量仍累计, 不会丢失。
+        stats = pending["stats"]
+    else:
+        stats = {}
+        current = None
+        for attempt in (0, 1):
+            try:
+                current = query_traffic()
+                break
+            except OSError as e:
+                # sing-box 刚重启时统计端口尚未就绪, 等 3 秒重试一次
+                if attempt == 0:
+                    time.sleep(3)
+                else:
+                    log("流量查询失败(sing-box 可能未运行): %s" % e)
+            except Exception as e:  # noqa: BLE001
                 log("流量查询失败(sing-box 可能未运行): %s" % e)
-        except Exception as e:  # noqa: BLE001
-            log("流量查询失败(sing-box 可能未运行): %s" % e)
-            break
+                break
+        if current is not None:
+            baseline = load_baseline()
+            if baseline is None:
+                # 升级/首次运行只建立基线, 避免把旧 reset 模式已报过的累计值重复记账
+                save_baseline(current)
+            else:
+                stats = traffic_delta(baseline, current)
+                if stats:
+                    report_id = secrets.token_hex(16)
+                    target = current
+                    save_pending({"id": report_id, "stats": stats, "target": target})
+                elif current != baseline:
+                    save_baseline(current)  # core 重启/用户移除后的零增量基线推进
     body = {
         "stats": stats,
         "applied_hash": state.get("hash", ""),
@@ -600,10 +723,29 @@ def report(state):
         "last_error": LAST_ERROR[0],
         "sb_running": singbox_running(),
     }
+    if report_id:
+        body["report_id"] = report_id
+    public_ips = cached_public_ips()
+    body["public_ipv4"] = public_ips["ipv4"]
+    body["public_ipv6"] = public_ips["ipv6"]
+    if public_ips["ipv4"] or public_ips["ipv6"]:
+        body["public_ip"] = public_ips["ipv4"] or public_ips["ipv6"]  # 兼容旧面板
     ci = cert_info()
     if ci:
         body["cert"] = ci
-    api_json("POST", "/agent/report", body)
+    resp = api_json("POST", "/agent/report", body)
+    if report_id and not resp.get("accounted", True):
+        raise RuntimeError("面板暂未确认流量记账, 下轮将按原报告 ID 重试")
+    if report_id:
+        if isinstance(target, dict):
+            save_baseline(target)
+        else:
+            # 兼容旧版 pending(无 target): 确认后以当前累计值建基线, 避免下轮双计
+            try:
+                save_baseline(query_traffic())
+            except Exception:  # noqa: BLE001
+                pass
+        clear_pending()
     LAST_ERROR[0] = ""
     if stats:
         total = sum(p[0] + p[1] for p in stats.values())
@@ -658,9 +800,13 @@ def main():
     while True:
         now = time.time()
         if now - HEALTH["ok_at"] > 300:
-            # 5 分钟无法与面板通信 (卡死/网络分区), 退出由 systemd 重启自愈
-            log("与面板通信中断超过 5 分钟, 重启 agent 自愈")
-            os._exit(1)
+            # 有 systemd 时退出重启可解开卡死线程; 无 supervisor 时必须继续重试,
+            # 否则一次网络分区就会变成永久离线。
+            if have_systemd_unit():
+                log("与面板通信中断超过 5 分钟, 重启 agent 自愈")
+                os._exit(1)
+            log("与面板通信中断超过 5 分钟, 无 systemd, 继续后台重试")
+            HEALTH["ok_at"] = now
         try:
             if now >= next_check:
                 if not singbox_running():

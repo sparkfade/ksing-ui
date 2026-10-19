@@ -2,10 +2,17 @@
   <Teleport to="body">
     <Transition name="pop">
       <div v-if="visible" class="overlay" @click.self="close">
-        <div class="modal">
+        <div
+          ref="box"
+          class="modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="title || '对话框'"
+          tabindex="-1"
+        >
           <div class="head">
             <h3>{{ title }}</h3>
-            <button class="x" @click="close">×</button>
+            <button class="x" aria-label="关闭" @click="close">×</button>
           </div>
           <div class="body">
             <slot />
@@ -20,12 +27,40 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, onUnmounted, ref, watch } from 'vue'
+import { confirmState } from '@/util/confirm'
+
 withDefaults(defineProps<{ title?: string }>(), { title: '' })
 const visible = defineModel<boolean>('visible', { required: true })
+
+const box = ref<HTMLElement>()
+let prevFocus: HTMLElement | null = null
 
 function close() {
   visible.value = false
 }
+
+function onKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (confirmState.visible) return // 确认框优先，避免连带关闭
+  e.stopPropagation()
+  close()
+}
+
+watch(visible, async (v) => {
+  if (v) {
+    prevFocus = document.activeElement as HTMLElement | null
+    document.addEventListener('keydown', onKey)
+    await nextTick()
+    box.value?.focus()
+  } else {
+    document.removeEventListener('keydown', onKey)
+    prevFocus?.focus?.()
+    prevFocus = null
+  }
+})
+
+onUnmounted(() => document.removeEventListener('keydown', onKey))
 </script>
 
 <style scoped>
@@ -51,6 +86,7 @@ function close() {
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-pop);
+  outline: none;
 }
 
 .head {

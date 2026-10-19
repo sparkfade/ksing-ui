@@ -20,9 +20,9 @@ AnyTLS 中控面板：纯官方 sing-box 裸核节点 + 集中配置下发 + v2r
 
 ## 功能
 
-- **节点管理**：一键安装命令接入（脚本 sha256 + CA 指纹双校验）；在线/同步状态；按节点分配用户
+- **节点管理**：一键安装命令接入（脚本 sha256 + CA 指纹双校验）；在线/同步状态；按节点分配用户；双栈 / 仅 IPv4 / 纯 IPv6
 - **三级分流**：全局规则 / 节点级（对该节点全体用户生效）/ 用户级（单独增删），出站为 Shadowsocks 节点池
-- **证书管理**：节点 sing-box 原生 ACME(Let's Encrypt）自动申请续签，面板统一查看状态；也支持 IP 自签（selfip）与显式 unsafe
+- **证书管理**：节点 sing-box 原生 ACME(Let's Encrypt）自动申请续签；IPv4/IPv6 使用不同域名并分别校验 A/AAAA，IPv6 未就绪只暂停该族；也支持 IP 自签（selfip）与显式 unsafe
 - **流量统计**：v2ray StatsService(gRPC）按用户/节点累计，仪表盘排名
 - **订阅**：按用户生成，sing-box / mihomo(Clash) / v2rayN 三格式（UA 嗅探或 `?type=`);mihomo 配置 fakeip + 防 DNS 泄露；自定义订阅 host/路径，一键重置换发
 - **面板账号**：管理员 + 多用户独立登录（用户只见自己的节点与订阅）；亮/暗主题；移动端适配
@@ -55,14 +55,15 @@ python3 /opt/ksing-ui/server.py --dir /etc/ksing-ui --listen 0.0.0.0 --port 8080
 
 打开 `http://<IP>:8080`，首次访问设置管理员密码。
 
-> 注意：面板本身是明文 HTTP，公网使用请套 TLS 反代或仅监听可信网络。节点与面板之间是独立的 HTTPS 通道（自签 CA + 指纹钉扎），不受影响。
+> 注意：面板本身是明文 HTTP，公网使用请套 TLS 反代或仅监听可信网络。节点与面板共用面板端口；HTTPS 部署时使用自签 CA + 指纹钉扎，明文 HTTP 会明确提示风险。
 
 ### 2. 接入节点（每台 VPS)
 
 面板 → 服务器节点 → 添加节点：
 
-- **域名证书（推荐）**：填节点域名（先把 A 记录解析到节点 IP，放行 80 端口供 ACME 验证），sing-box 自动申请/续签正式证书
-- **IP 自签证书**：无域名时生成 IP SAN 自签证书，客户端需 allowInsecure
+- **网络模式**：默认双栈（有 IPv6 自动使用）；也可选仅 IPv4 或纯 IPv6
+- **域名证书（推荐）**：IPv4 域名需 A 记录指向节点；如使用 IPv6，IPv6 域名需单独配置 AAAA 记录，放行 80 端口供 ACME 验证。IPv6 域名未就绪时，面板提示并仅暂停 IPv6 入口，不影响 IPv4
+- **IP 自签证书**：无域名时生成含 IPv4/IPv6 SAN 的自签证书，客户端需 allowInsecure
 - **不安全模式**：需显式确认，自签假域名证书
 
 提交后得到一键安装命令，在节点上以 root 执行即可（装 sing-box + agent + systemd，自动拉起）。
@@ -81,7 +82,8 @@ python3 /opt/ksing-ui/server.py --dir /etc/ksing-ui --listen 0.0.0.0 --port 8080
 
 ```bash
 python3 sbtool.py --dir /etc/ksing-ui user add alice          # 加用户
-python3 sbtool.py --dir /etc/ksing-ui srv add hk --port 443 --domain hk1.example.com  # 加节点
+python3 sbtool.py --dir /etc/ksing-ui srv add hk --port 443 --domain hk4.example.com --domain6 hk6.example.com  # 双栈节点
+python3 sbtool.py --dir /etc/ksing-ui srv add v6 --port 443 --ip-mode ipv6 --domain6 hk6.example.com        # 纯 IPv6 节点
 python3 sbtool.py --dir /etc/ksing-ui node import 'ss://...'  # 导入 SS 出站
 python3 sbtool.py --dir /etc/ksing-ui route add --suffix .cn --to direct
 python3 sbtool.py --dir /etc/ksing-ui update                  # 下载全部规则集
@@ -112,7 +114,7 @@ python3 server.py --dir ./sbdata --listen 127.0.0.1 --port 8080
 
 ## 安全说明
 
-- 节点 token 只在创建/重置时显示一次，服务端只存哈希；重置后旧 token 立即失效
-- agent 通道：独立 HTTPS 端口，自签 CA + 证书钉扎，与面板 API 完全隔离
+- 节点安装令牌一次性使用，激活后换成永久节点 token；面板只存哈希，重置后旧 token 立即失效
+- agent 通道与面板共用监听地址；HTTPS 部署时使用自签 CA + 证书钉扎，安装命令还校验脚本哈希
 - 数据目录（含全部密码/凭据）权限 600/700，请做好备份
 - 面板 HTTP 明文仅限可信网络；公网部署务必加 TLS 反代

@@ -1,6 +1,6 @@
 <template>
   <div class="code-box">
-    <span class="txt" :class="{ multi }">{{ text }}</span>
+    <span class="txt" :class="{ multi: multiline }">{{ text }}</span>
     <CopyButton :text="text" small />
   </div>
 </template>

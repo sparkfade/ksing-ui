@@ -436,7 +436,7 @@ async function saveRule() {
   saving.value = true
   try {
     await post('/api/routes', body)
-    toast('规则已添加，已自动下发到相关节点', 'success')
+    toast('规则已添加，等待节点同步', 'success')
     addVisible.value = false
     load()
   } catch (e) {
@@ -456,7 +456,7 @@ onMounted(async () => {
 <style scoped>
 .grid2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 16px;
 }

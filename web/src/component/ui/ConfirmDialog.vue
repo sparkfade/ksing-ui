@@ -2,7 +2,14 @@
   <Teleport to="body">
     <Transition name="pop">
       <div v-if="confirmState.visible" class="overlay" @click.self="settleConfirm(false)">
-        <div class="box">
+        <div
+          ref="box"
+          class="box"
+          role="dialog"
+          aria-modal="true"
+          aria-label="确认操作"
+          tabindex="-1"
+        >
           <p class="msg">{{ confirmState.text }}</p>
           <div class="acts">
             <Button @click="settleConfirm(false)">取消</Button>
@@ -15,8 +22,36 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, onUnmounted, ref, watch } from 'vue'
 import Button from './Button.vue'
 import { confirmState, settleConfirm } from '@/util/confirm'
+
+const box = ref<HTMLElement>()
+let prevFocus: HTMLElement | null = null
+
+function onKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  e.stopPropagation()
+  settleConfirm(false)
+}
+
+watch(
+  () => confirmState.visible,
+  async (v) => {
+    if (v) {
+      prevFocus = document.activeElement as HTMLElement | null
+      document.addEventListener('keydown', onKey)
+      await nextTick()
+      box.value?.focus()
+    } else {
+      document.removeEventListener('keydown', onKey)
+      prevFocus?.focus?.()
+      prevFocus = null
+    }
+  },
+)
+
+onUnmounted(() => document.removeEventListener('keydown', onKey))
 </script>
 
 <style scoped>
@@ -40,6 +75,7 @@ import { confirmState, settleConfirm } from '@/util/confirm'
   max-width: 100%;
   padding: 22px 22px 16px;
   box-shadow: var(--shadow-pop);
+  outline: none;
 }
 
 .msg {

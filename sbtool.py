@@ -27,12 +27,14 @@ import base64
 import concurrent.futures as cf
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -527,7 +529,7 @@ def parse_anytls_link(link):
     if "@" not in body:
         die("无法解析 anytls 链接 (缺少 password@host): %s" % raw[:50])
     password, hostport = body.rstrip("/").rsplit("@", 1)
-    password = urllib.parse.unquote(password).strip()
+    password = urllib.parse.unquote(password)
     if not password:
         die("anytls 链接缺少密码: %s" % raw[:50])
     hostport = hostport.strip().rstrip("/")
@@ -557,9 +559,11 @@ def validate_anytls_node(node):
     if not (1 <= port <= 65535):
         die("端口非法: %s" % port)
 
-def validate_node(method, password, port):
+def validate_node(method, password, port, plugin=""):
     if method not in SS_METHODS:
         die("不支持的 method %s\n可选: %s" % (method, ", ".join(SS_METHODS)))
+    if plugin and plugin not in SS_PLUGINS:
+        die("sing-box 仅支持插件 %s, 不是 %s" % ("/".join(SS_PLUGINS), plugin))
     if method.startswith("2022-blake3-"):
         need = 16 if "aes-128" in method else 32
         try:
@@ -572,15 +576,22 @@ def validate_node(method, password, port):
     if not (1 <= port <= 65535):
         die("端口非法: %d" % port)
 
-def add_node(nodes, tag, node, force=False):
-    if tag in ("direct", "block", "dns-out"):
+
+def validate_node_tag(tag):
+    if not tag or len(tag) > 64 or "/" in tag or any(ord(c) < 32 or ord(c) == 127 for c in tag):
+        die("tag 需为 1-64 字符, 不能包含 / 或控制字符")
+    if tag in ("direct", "block", "dns-out", "reject"):
         die("tag %s 为内置保留名" % tag)
+
+
+def add_node(nodes, tag, node, force=False):
+    validate_node_tag(tag)
     if tag in nodes and not force:
         die("节点 %s 已存在 (用 --force 覆盖)" % tag)
     if node.get("type") == "anytls":
         validate_anytls_node(node)
     else:
-        validate_node(node["method"], node["password"], node["server_port"])
+        validate_node(node["method"], node["password"], node["server_port"], node.get("plugin", ""))
     nodes[tag] = node
 
 def cmd_node(args):
@@ -903,13 +914,30 @@ def load_servers(base):
         srv.setdefault("install_hash", "")      # 一次性安装令牌哈希 (激活兑换后移除)
         srv.setdefault("port", 443)
         srv.setdefault("sni", "")
-        srv.setdefault("domain", "")           # 节点域名 (acme 模式必填, 用户已自行解析到节点 IP)
+        srv.setdefault("domain", "")           # IPv4 域名 (acme 模式; 需 A 记录)
+        srv.setdefault("domain6", "")          # IPv6 域名 (acme 双栈/纯 IPv6; 需 AAAA 记录)
+        srv.setdefault("ip_mode", "dual")      # dual=双栈 / ipv4=仅IPv4 / ipv6=仅IPv6
         srv.setdefault("cert_mode", "")        # acme / selfip / unsafe
         srv.setdefault("acme_email", "")
         srv.pop("sni", None)                   # 伪装 SNI 已废弃: acme 用域名, 自签用全局设置
         srv.pop("address", None)               # 订阅地址不再手填: 域名或上报 IP
-        srv.setdefault("reported_ip", "")
-        srv.setdefault("users", [])         # 空 = 全部启用用户
+        srv.setdefault("reported_ip", "")      # 旧字段: 兼容旧 agent, 等价于任一上报地址
+        srv.setdefault("reported_ipv4", "")
+        srv.setdefault("reported_ipv6", "")
+        legacy = srv.get("reported_ip") or ""
+        if legacy and not srv["reported_ipv4"] and not srv["reported_ipv6"]:
+            try:
+                addr = ipaddress.ip_address(legacy)
+                srv["reported_ipv4" if addr.version == 4 else "reported_ipv6"] = legacy
+            except ValueError:
+                pass
+        srv.setdefault("users", [])
+        # users_mode: all=全部 / selected=指定 / none=无用户。
+        # 旧数据没有该字段且 users=[] 时语义是全部, 必须保留; 新空列表可表示无用户。
+        mode = srv.get("users_mode")
+        if mode not in ("all", "selected", "none"):
+            mode = "selected" if srv["users"] else "all"
+        srv["users_mode"] = mode
         srv.setdefault("note", "")
         srv.setdefault("enabled", True)
         srv.setdefault("created_at", 0)
@@ -927,17 +955,23 @@ def save_servers(base, servers):
     save_json(paths(base)["servers"], servers)
 
 
-def server_addr(srv):
-    """订阅链接中节点的地址: acme 模式用域名, 否则用 agent 上报的 IP (中控统一生成, 无每节点手填)"""
-    if srv.get("cert_mode") == "acme" and srv.get("domain"):
-        return srv["domain"]
-    return srv.get("reported_ip") or ""
+def server_addr(srv, family="ipv4"):
+    """按协议族取节点订阅地址; acme 用对应域名, 自签模式用 agent 上报 IP"""
+    if srv.get("cert_mode") == "acme":
+        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain")
+        if domain:
+            return domain
+    if family == "ipv6":
+        return srv.get("reported_ipv6") or ""
+    return srv.get("reported_ipv4") or srv.get("reported_ip") or ""
 
 
-def server_sni(s, srv):
-    """节点 SNI: acme 即域名本身; 自签模式用全局伪装 SNI (可为空)"""
-    if srv.get("cert_mode") == "acme" and srv.get("domain"):
-        return srv["domain"]
+def server_sni(s, srv, family="ipv4"):
+    """节点 SNI: acme 即对应协议族域名; 自签模式用全局伪装 SNI (可为空)"""
+    if srv.get("cert_mode") == "acme":
+        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain")
+        if domain:
+            return domain
     return s.get("sni") or ""
 
 
@@ -946,13 +980,106 @@ def server_insecure(srv):
     return srv.get("cert_mode") != "acme"
 
 
+_DNS_CACHE = {}  # (domain, family) -> (at, [ip...]); 状态页/配置生成共用 60s 缓存
+
+
+def resolve_domain_ips(domain, family):
+    """解析域名 A/AAAA, 仅返回全球单播地址; 失败/超时按空列表处理"""
+    if not domain:
+        return []
+    key = (domain, family)
+    hit = _DNS_CACHE.get(key)
+    now = time.time()
+    if hit and now - hit[0] < 60:
+        return list(hit[1])
+    try:
+        infos = socket.getaddrinfo(domain, None,
+                                   socket.AF_INET if family == "ipv4" else socket.AF_INET6,
+                                   socket.SOCK_STREAM)
+        out = []
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_global:
+                    text = str(ip)
+                    if text not in out:
+                        out.append(text)
+            except ValueError:
+                continue
+    except (OSError, ValueError):
+        out = []
+    _DNS_CACHE[key] = (now, out)
+    return out
+
+
+def server_family_status(srv):
+    """IPv4/IPv6 可用状态: 面板提示与订阅下发共用; IPv6 DNS 未就绪时仅停用该族"""
+    mode = srv.get("ip_mode") or "dual"
+    if mode not in ("dual", "ipv4", "ipv6"):
+        mode = "dual"
+    out = {}
+    for family in ("ipv4", "ipv6"):
+        enabled = (mode == "dual") or (mode == family)
+        reported = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
+        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain", "")
+        ent = {"enabled": enabled, "active": False, "reported_ip": reported,
+               "domain": domain, "error": ""}
+        if not enabled:
+            ent["error"] = "已停用"
+        elif srv.get("cert_mode") == "acme":
+            if family == "ipv6" and not reported:
+                ent["error"] = "未检测到节点 IPv6"
+            elif not domain:
+                ent["error"] = ("检测到节点 IPv6, 但未配置 IPv6 域名" if family == "ipv6"
+                                else "未配置 IPv4 域名")
+            else:
+                ips = resolve_domain_ips(domain, family)
+                rr = "AAAA" if family == "ipv6" else "A"
+                if not ips:
+                    ent["error"] = "域名缺少 %s 记录" % rr
+                elif reported and reported not in ips:
+                    ent["error"] = "%s 记录未指向节点上报的 %s" % (rr, family.upper())
+                elif family == "ipv4" or reported:
+                    # IPv4 为兼容旧流程: 有 A 记录即可先启用; IPv6 必须等到上报匹配
+                    ent["active"] = True
+        else:
+            if reported:
+                ent["active"] = True
+            else:
+                ent["error"] = "未检测到节点 %s" % family.upper()
+        ent["address"] = server_addr(srv, family) if ent["active"] else ""
+        out[family] = ent
+    return out
+
+
+def family_status_key(srv):
+    st = server_family_status(srv)
+    return ";".join("%s:%s:%s:%s:%s" % (family, st[family]["active"], st[family]["domain"],
+                                        st[family]["reported_ip"], st[family]["error"])
+                    for family in ("ipv4", "ipv6"))
+
+
+def server_acme_domains(srv):
+    """ACME 申请域名: IPv4 域名保持旧行为; IPv6 仅 AAAA 校验通过后才加入证书申请"""
+    st = server_family_status(srv)
+    domains = []
+    if st["ipv4"]["enabled"] and srv.get("domain"):
+        domains.append(srv["domain"])
+    if st["ipv6"]["enabled"] and srv.get("domain6") and st["ipv6"]["active"]:
+        domains.append(srv["domain6"])
+    return domains
+
+
 def server_users(base, srv):
-    """该节点实际下发的用户 {name: user} (交集: 可用用户 ∩ 节点分配用户; 空列表=全部)"""
+    """该节点实际下发的用户: all=全部可用用户, selected=指定交集, none=空"""
+    mode = srv.get("users_mode") or ("selected" if srv.get("users") else "all")
+    if mode == "none":
+        return {}
     t = load_traffic(base)  # 读一次, 避免每用户重复 IO
     users = {k: u for k, u in load_users(base).items() if user_active(base, k, u, t)}
-    want = [u for u in srv.get("users", []) if u]
-    if not want:
+    if mode == "all":
         return users
+    want = [u for u in srv.get("users", []) if u]
     return {k: users[k] for k in want if k in users}
 
 
@@ -1040,12 +1167,25 @@ def build_server_config(base, sid):
         fp = os.path.join(base, cat[t]["file"])
         if not os.path.exists(fp):
             die("规则集文件缺失: %s (重新运行 update)" % t)
-        rulesets_meta.append({"tag": t, "file": os.path.basename(cat[t]["file"]),
+        # 节点上按 tag 的哈希命名: 不同来源常有同名 cn.srs,  basename 平铺会互相覆盖
+        remote_name = "rs-%s.srs" % hashlib.sha256(t.encode("utf-8")).hexdigest()[:24]
+        rulesets_meta.append({"tag": t, "file": remote_name,
                               "sha256": file_sha256(fp), "size": os.path.getsize(fp)})
 
+    # 只下发本节点实际引用的出站, 避免任一节点被攻陷后泄露整个上游凭据池
+    used_outs = {"direct"}
+    if final != "reject":
+        used_outs.add(final)
+    for r in rules_in:
+        if r.get("action") != "reject":
+            used_outs.add(r["outbound"])
+    for uname, uout in rc.get("user_final", {}).items():
+        if uname in unames and uout != "reject" and uout in valid_outs:
+            used_outs.add(uout)
     outbounds = []
     for tag, n in nodes.items():
-        outbounds.append(node_outbound(tag, n))
+        if tag in used_outs:
+            outbounds.append(node_outbound(tag, n))
     outbounds.append({"type": "direct", "tag": "direct"})
 
     rules = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}]
@@ -1109,13 +1249,13 @@ def build_server_config(base, sid):
     # TLS: acme (证书自动申请续签) 或本地证书文件 (selfip/unsafe 由 install.sh 生成)
     cert_mode = srv.get("cert_mode") or "unsafe"
     if cert_mode == "acme":
-        domain = srv.get("domain", "")
-        if not domain:
-            die("节点 %s 使用 acme 证书但未配置域名" % sid)
+        domains = server_acme_domains(srv)
+        if not domains:
+            die("节点 %s 使用 acme 证书, 但 IPv4/IPv6 域名 DNS 均未就绪" % sid)
         tls = {"enabled": True, "certificate_provider": "acme"}
         cert_providers = [{
             "type": "acme", "tag": "acme",
-            "domain": [domain],
+            "domain": domains,
             "data_directory": os.path.join(SERVER_DIR, "acme"),
             "email": srv.get("acme_email") or "",
             "provider": "letsencrypt",
@@ -1135,7 +1275,7 @@ def build_server_config(base, sid):
                 "stats": {
                     "enabled": True,
                     "inbounds": ["anytls-in"],
-                    "outbounds": sorted(valid_outs),
+                    "outbounds": sorted(used_outs),
                     "users": sorted(unames),
                 },
             },
@@ -1175,7 +1315,8 @@ def build_server_config(base, sid):
     if not cert_providers:
         cfg.pop("certificate_providers")
     meta = {"rulesets": rulesets_meta, "users": sorted(unames), "sni": server_sni(s, srv),
-            "domain": srv.get("domain", ""), "cert_mode": cert_mode}
+            "domain": srv.get("domain", ""), "domain6": srv.get("domain6", ""),
+            "ip_mode": srv.get("ip_mode") or "dual", "cert_mode": cert_mode}
     return cfg, meta
 
 
@@ -1189,8 +1330,9 @@ def server_bundle(base, sid):
 
 # ---------------------------------------------------------------- 流量记账
 
-def add_traffic(base, sid, stats):
-    """累加一次节点上报的流量增量 stats={user: [up, down]}; 带文件锁保证并发安全"""
+def add_traffic(base, sid, stats, report_id=""):
+    """累加节点流量增量; report_id 用于响应丢失后的安全重试去重。
+    返回 True=本次已记账, False=重复报告已忽略。带文件锁保证并发安全"""
     import fcntl
     P = paths(base)
     os.makedirs(base, exist_ok=True)
@@ -1201,6 +1343,8 @@ def add_traffic(base, sid, stats):
             t.setdefault("users", {})
             t.setdefault("servers", {})
             sv = t["servers"].setdefault(sid, {"up": 0, "down": 0, "users": {}})
+            if report_id and sv.get("last_report_id") == report_id:
+                return False
             for name, pair in stats.items():
                 try:
                     up, down = int(pair[0]), int(pair[1])
@@ -1216,7 +1360,10 @@ def add_traffic(base, sid, stats):
                 su = sv["users"].setdefault(name, {"up": 0, "down": 0})
                 su["up"] += up
                 su["down"] += down
+            if report_id:
+                sv["last_report_id"] = report_id
             save_json(P["traffic"], t)
+            return True
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
@@ -1448,17 +1595,7 @@ def build_config(base):
     # outbounds
     outbounds = []
     for tag, n in nodes.items():
-        ob = {
-            "type": "shadowsocks", "tag": tag,
-            "server": n["server"], "server_port": n["server_port"],
-            "method": n["method"], "password": n["password"],
-        }
-        if n.get("udp_over_tcp"):
-            ob["udp_over_tcp"] = True
-        if n.get("plugin"):
-            ob["plugin"] = n["plugin"]
-            ob["plugin_opts"] = n.get("plugin_opts", "")
-        outbounds.append(ob)
+        outbounds.append(node_outbound(tag, n))
     outbounds.append({"type": "direct", "tag": "direct"})
 
     # route rules
@@ -1618,17 +1755,29 @@ def cmd_srv(args):
             sid = secrets.token_hex(4)
         token = gen_server_token()
         users = parse_users_arg(base, args.user) if args.user else []
-        cert_mode = args.cert_mode or ("acme" if args.domain else "")
+        ip_mode = args.ip_mode
+        cert_mode = args.cert_mode or ("acme" if (args.domain or args.domain6) else "")
         if not cert_mode:
             die("未绑定域名时必须显式选择 --cert-mode selfip 或 unsafe")
-        if cert_mode == "acme" and not args.domain:
-            die("acme 模式需要 --domain")
+        if args.domain and args.domain6 and args.domain == args.domain6:
+            die("IPv4 与 IPv6 域名不能相同")
+        if ip_mode == "ipv4" and args.domain6:
+            die("仅 IPv4 模式不能配置 --domain6")
+        if ip_mode == "ipv6" and args.domain:
+            die("仅 IPv6 模式不能配置 --domain")
+        if cert_mode == "acme":
+            if ip_mode != "ipv6" and not args.domain:
+                die("acme 模式需要 --domain (IPv4 域名)")
+            if ip_mode == "ipv6" and not args.domain6:
+                die("纯 IPv6 节点需要 --domain6 (IPv6 域名)")
         servers[sid] = {
             "name": args.name, "token_hash": hash_server_token(token),
             "port": args.port,
-            "domain": args.domain or "", "cert_mode": cert_mode,
+            "domain": args.domain or "", "domain6": args.domain6 or "",
+            "ip_mode": ip_mode, "cert_mode": cert_mode,
             "acme_email": args.acme_email or "",
-            "users": users, "note": args.note or "", "enabled": True,
+            "users": users, "users_mode": "selected" if users else "all",
+            "note": args.note or "", "enabled": True,
             "created_at": int(time.time()),
         }
         save_servers(base, servers)
@@ -1775,7 +1924,10 @@ def main():
     pa = ss.add_parser("add", help="添加节点, 生成一次性 token")
     pa.add_argument("name", help="节点名, 如 香港-01")
     pa.add_argument("--port", type=int, required=True, help="AnyTLS 监听端口")
-    pa.add_argument("--domain", help="节点域名 (需已解析到节点 IP, 自动申请/续签证书)")
+    pa.add_argument("--domain", help="IPv4 域名 (需 A 记录指向节点, 自动申请/续签证书)")
+    pa.add_argument("--domain6", help="IPv6 域名 (需 AAAA 记录指向节点)")
+    pa.add_argument("--ip-mode", choices=["dual", "ipv4", "ipv6"], default="dual",
+                    help="节点网络: dual=双栈(默认) ipv4=仅IPv4 ipv6=纯IPv6")
     pa.add_argument("--cert-mode", choices=["acme", "selfip", "unsafe"],
                     help="证书模式: acme=域名正式证书(默认) selfip=IP自签 unsafe=自签(不安全)")
     pa.add_argument("--acme-email", help="ACME 账号邮箱")

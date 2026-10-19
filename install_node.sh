@@ -99,26 +99,49 @@ META="$($CURL -H "Authorization: Bearer $TOKEN" "$API_URL/agent/node-meta")"
 CERT_MODE="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("cert_mode",""))' <<<"$META")"
 SNI="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("sni",""))' <<<"$META")"
 DOMAIN="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("domain",""))' <<<"$META")"
+DOMAIN6="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("domain6",""))' <<<"$META")"
+IP_MODE="$($PYBIN -c 'import json,sys; print(json.load(sys.stdin).get("ip_mode","dual"))' <<<"$META")"
 SNI="${SNI:-anytls.example.com}"
 
-echo "[2/5] 证书处理 (模式: ${CERT_MODE:-未知}) ..."
+echo "[2/5] 证书处理 (模式: ${CERT_MODE:-未知}, 网络: ${IP_MODE:-dual}) ..."
 case "$CERT_MODE" in
   acme)
-    [ -n "$DOMAIN" ] || { echo "acme 模式但面板未配置域名"; exit 1; }
-    echo "  使用 ACME 自动证书: $DOMAIN (由 sing-box 申请并自动续签)"
-    echo "  请确认: ① 域名 $DOMAIN 已解析到本机 ② 本机 80 端口空闲且放行 (HTTP-01 验证)"
+    if [ "$IP_MODE" = "ipv6" ]; then
+      [ -n "$DOMAIN6" ] || { echo "纯 IPv6 节点需要配置 IPv6 域名"; exit 1; }
+      echo "  使用 ACME 自动证书: $DOMAIN6 (由 sing-box 申请并自动续签)"
+      echo "  请确认: ① $DOMAIN6 的 AAAA 记录已解析到本机 IPv6 ② 本机 80 端口空闲且放行 (HTTP-01 验证)"
+    else
+      [ -n "$DOMAIN" ] || { echo "acme 模式但面板未配置 IPv4 域名"; exit 1; }
+      echo "  使用 ACME 自动证书: $DOMAIN${DOMAIN6:+, $DOMAIN6} (由 sing-box 申请并自动续签)"
+      echo "  请确认: ① $DOMAIN 的 A 记录已解析到本机 IPv4 ${DOMAIN6:+; $DOMAIN6 的 AAAA 记录已解析到本机 IPv6 }② 本机 80 端口空闲且放行 (HTTP-01 验证)"
+      if [ "$IP_MODE" != "ipv4" ] && [ -z "$DOMAIN6" ]; then
+        echo "  提示: 若本机存在 IPv6, 面板检测到后会要求补充 IPv6 域名并校验 AAAA; 未就绪时仅停用 IPv6 入口"
+      fi
+    fi
     if ss -tln 2>/dev/null | grep -qE ':(80)\s'; then
       echo "  警告: 80 端口已被占用, ACME HTTP-01 验证可能失败"
     fi
     rm -f "$DIR/cert.pem" "$DIR/key.pem" 2>/dev/null || true
     ;;
   selfip)
-    # IP 自签证书 (SAN 含节点 IP); 客户端需允许不安全连接
-    IP="$(curl -4fsSL --max-time 10 https://ifconfig.me 2>/dev/null || curl -4fsSL --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-    [[ "$IP" =~ ^[0-9.]{7,45}$ ]] || { echo "无法确定节点公网 IP"; exit 1; }
-    echo "  生成 IP 自签证书 (SAN: IP:$IP); 客户端需开启 allowInsecure"
+    # IP 自签证书 (SAN 含节点公网 IPv4/IPv6); 客户端需允许不安全连接
+    IP4=""; IP6=""
+    if [ "$IP_MODE" != "ipv6" ]; then
+      IP4="$(curl -4fsSL --max-time 10 https://ifconfig.me 2>/dev/null || curl -4fsSL --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+      [[ "$IP4" =~ ^[0-9.]{7,45}$ ]] || IP4=""
+    fi
+    if [ "$IP_MODE" != "ipv4" ]; then
+      IP6="$(curl -6fsSL --max-time 10 https://ipv6.icanhazip.com 2>/dev/null || curl -6fsSL --max-time 10 https://api6.ipify.org 2>/dev/null || true)"
+      "$PYBIN" -c 'import ipaddress,sys; a=ipaddress.ip_address(sys.argv[1]); sys.exit(a.version != 6)' "$IP6" 2>/dev/null || IP6=""
+    fi
+    [ -n "$IP4$IP6" ] || { echo "无法确定节点公网 IP"; exit 1; }
+    CN="${IP4:-$IP6}"
+    SAN=""
+    [ -n "$IP4" ] && SAN="IP:$IP4"
+    [ -n "$IP6" ] && SAN="${SAN:+$SAN,}IP:$IP6"
+    echo "  生成 IP 自签证书 (SAN: $SAN); 客户端需开启 allowInsecure"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
-      -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" \
+      -subj "/CN=$CN" -addext "subjectAltName=$SAN" \
       -keyout "$DIR/key.pem" -out "$DIR/cert.pem" 2>/dev/null
     chmod 600 "$DIR/key.pem"
     ;;

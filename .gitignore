@@ -1,5 +1,6 @@
 # 数据目录: 含用户密码/订阅token/管理员凭据/生成的配置/证书缓存/日志
 sbdata/
+/cache.db
 
 # Python
 __pycache__/

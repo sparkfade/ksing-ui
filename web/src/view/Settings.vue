@@ -150,7 +150,7 @@ async function save() {
       panel_port: Number(form.panel_port),
       sub_port: Number(form.sub_port) || 0,
     })
-    toast('设置已保存，已自动下发到相关节点', 'success')
+    toast('设置已保存，等待节点同步', 'success')
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {

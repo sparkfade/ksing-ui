@@ -13,6 +13,7 @@ const model = defineModel<boolean>({ default: false })
 
 <style scoped>
 .toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -26,7 +27,16 @@ const model = defineModel<boolean>({ default: false })
 }
 
 input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toggle:focus-within .track {
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
 }
 
 .track {

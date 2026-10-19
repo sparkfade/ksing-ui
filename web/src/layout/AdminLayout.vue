@@ -117,7 +117,9 @@ function doLogout() {
 
 onMounted(() => {
   refreshStatus()
-  timer = setInterval(refreshStatus, 20000)
+  timer = setInterval(() => {
+    if (!document.hidden) refreshStatus()
+  }, 20000)
 })
 
 onUnmounted(() => clearInterval(timer))
@@ -336,10 +338,14 @@ onUnmounted(() => clearInterval(timer))
     height: 100vh;
     transform: translateX(-105%);
     box-shadow: var(--shadow-pop);
+    visibility: hidden;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.22s var(--ease), visibility 0s linear 0.22s;
   }
 
   .side.open {
     transform: none;
+    visibility: visible;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.22s var(--ease), visibility 0s;
   }
 
   .mask {

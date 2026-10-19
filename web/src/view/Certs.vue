@@ -29,7 +29,21 @@
                 <span style="font-weight: 600">{{ c.name }}</span>
                 <div class="mono faint sid">{{ c.sid }}</div>
               </td>
-              <td class="mono">{{ c.domain || 'IP 模式' }}</td>
+              <td>
+                <div class="cert-fam">
+                  <span class="mono">{{ c.domain || (c.cert_mode === 'acme' ? '未配置 IPv4 域名' : 'IP 模式') }}</span>
+                  <span v-if="c.cert_mode === 'acme' && c.ip_status?.ipv4.enabled" class="rr" :class="rrCls(c.ip_status.ipv4)" :title="c.ip_status.ipv4.active ? 'A 记录正常' : c.ip_status.ipv4.error || '等待检测'">A</span>
+                </div>
+                <div v-if="c.domain6 || c.ip_status?.ipv6.enabled" class="cert-fam">
+                  <span class="mono">{{ c.domain6 || '未配置 IPv6 域名' }}</span>
+                  <span
+                    v-if="c.cert_mode === 'acme' && c.ip_status?.ipv6.enabled"
+                    class="rr"
+                    :class="rrCls(c.ip_status.ipv6)"
+                    :title="c.ip_status.ipv6.active ? 'AAAA 记录正常' : `${c.ip_status.ipv6.error || '等待检测'}；未就绪前暂不加入证书申请`"
+                  >AAAA</span>
+                </div>
+              </td>
               <td><Badge :color="modeColor(c.cert_mode)">{{ modeLabel(c.cert_mode) }}</Badge></td>
               <td class="muted">{{ c.issuer || '-' }}</td>
               <td class="mono">{{ c.not_after ? fmtTime(c.not_after) : '-' }}</td>
@@ -51,7 +65,7 @@ import Spinner from '@/component/ui/Spinner.vue'
 import { get } from '@/util/request'
 import { toast } from '@/util/toast'
 import { fmtTime } from '@/util/format'
-import type { CertItem } from '@/types'
+import type { CertItem, FamilyStatus } from '@/types'
 
 const certs = ref<CertItem[]>([])
 const loading = ref(true)
@@ -75,6 +89,10 @@ function statusText(c: CertItem): string {
   return `剩 ${Math.round(c.days_left ?? 0)} 天`
 }
 
+function rrCls(f: FamilyStatus): string {
+  return f.active ? 'ok' : 'warn'
+}
+
 async function load() {
   loading.value = true
   try {
@@ -88,7 +106,9 @@ async function load() {
 
 onMounted(() => {
   load()
-  timer = setInterval(load, 30000)
+  timer = setInterval(() => {
+    if (!document.hidden) load()
+  }, 30000)
 })
 
 onUnmounted(() => clearInterval(timer))
@@ -98,5 +118,34 @@ onUnmounted(() => clearInterval(timer))
 .sid {
   font-size: 11.5px;
   margin-top: 3px;
+}
+
+.cert-fam {
+  display: flex;
+  align-items: center;
+}
+
+.cert-fam + .cert-fam {
+  margin-top: 3px;
+}
+
+.rr {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 4px;
+  margin-left: 6px;
+  line-height: 1.7;
+}
+
+.rr.ok {
+  background: var(--c-green-soft);
+  color: var(--c-green);
+}
+
+.rr.warn {
+  background: var(--c-yellow-soft);
+  color: var(--c-yellow);
+  cursor: help;
 }
 </style>

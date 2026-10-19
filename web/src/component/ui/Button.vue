@@ -101,6 +101,12 @@ withDefaults(
   border-radius: 8px;
 }
 
+@media (max-width: 767px) {
+  .btn.sm {
+    padding: 7px 12px;
+  }
+}
+
 .btn.block {
   width: 100%;
 }

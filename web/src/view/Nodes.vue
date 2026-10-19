@@ -100,8 +100,13 @@
         </template>
         <template v-else>
           <Select v-model="form.method" label="加密方式" :options="SS_METHODS" />
-          <Input v-model="form.password" label="密码" placeholder="节点密码" />
-          <Input v-model="form.plugin" label="插件 (可选)" placeholder="obfs / v2ray-plugin" />
+          <Input
+            v-model="form.password"
+            :label="form.method.startsWith('2022-blake3-') ? '密钥' : '密码'"
+            :hint="form.method.startsWith('2022-blake3-') ? 'Base64 编码的 16 字节（128 位）或 32 字节（256 位）密钥' : ''"
+            placeholder="节点密码 / 密钥"
+          />
+          <Select v-model="form.plugin" label="插件 (可选)" :options="SS_PLUGINS" />
           <Input v-model="form.plugin_opts" label="插件参数 (可选)" placeholder="obfs=http;obfs-host=example.com" />
           <div class="field-row">
             <Toggle v-model="form.udp_over_tcp" label="UDP over TCP" />
@@ -167,6 +172,11 @@ const saving = ref(false)
 const TYPE_OPTIONS = [
   { label: 'Shadowsocks', value: 'ss' },
   { label: 'AnyTLS (anytls:// 链接)', value: 'anytls' },
+]
+const SS_PLUGINS = [
+  { label: '不使用插件', value: '' },
+  { label: 'obfs-local', value: 'obfs-local' },
+  { label: 'v2ray-plugin', value: 'v2ray-plugin' },
 ]
 const form = reactive({
   tag: '',
@@ -294,7 +304,7 @@ async function save() {
             type: 'anytls',
             server: form.server.trim(),
             server_port: Number(form.server_port),
-            password: form.password.trim(),
+            password: form.password,
             sni: form.sni.trim(),
             insecure: form.insecure,
           }

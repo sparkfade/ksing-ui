@@ -5,7 +5,7 @@
       <div class="spacer"></div>
       <Button small @click="loadAll" :loading="loading">刷新</Button>
     </div>
-    <p class="page-sub">配置变更实时（秒级）自动下发到各服务器节点并生效，无需手动应用。</p>
+    <p class="page-sub">配置变更保存后由节点自动拉取并生效；只有节点 hash 一致时才显示「已同步」。</p>
 
     <Spinner v-if="loading && !st" />
 
@@ -53,7 +53,7 @@
             <Button small variant="primary" @click="router.push('/servers')">去添加</Button>
           </Empty>
           <div v-else class="srv-list">
-            <div v-for="s in servers" :key="s.sid" class="srv-row" @click="router.push('/servers')">
+            <div v-for="s in servers" :key="s.sid" class="srv-row" role="button" tabindex="0" @click="router.push('/servers')" @keydown.enter="router.push('/servers')">
               <span class="dot" :class="{ on: s.online }"></span>
               <div class="srv-main">
                 <div class="srv-line1">
@@ -62,9 +62,8 @@
                   <Badge v-else-if="s.sb_running === false" color="red">核心停止</Badge>
                   <Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge>
                 </div>
-                <div class="srv-line2 mono muted">
-                  {{ s.cert_mode === 'acme' ? s.domain : s.reported_ip || '待上报' }}:{{ s.port }}
-                </div>
+                <div class="srv-line2 mono muted">{{ srvAddr(s) }}</div>
+                <div v-if="v6Warn(s)" class="srv-err" :title="v6Warn(s)">⚠ IPv6 已检测到但未就绪，已暂停 v6 入口</div>
               </div>
               <div class="srv-nums">
                 <span class="mono srv-rate">
@@ -149,6 +148,25 @@ function rateOf(sid: string): RateStat | undefined {
   return traffic.value.rates?.servers?.[sid]
 }
 
+function srvAddr(s: ServerItem): string {
+  const st = s.ip_status
+  const wrap = (a: string) => (a.includes(':') ? `[${a}]` : a)
+  const parts: string[] = []
+  if (st) {
+    if (st.ipv4.active && st.ipv4.address) parts.push(`${wrap(st.ipv4.address)}:${s.port}`)
+    if (st.ipv6.active && st.ipv6.address) parts.push(`${wrap(st.ipv6.address)}:${s.port}`)
+  }
+  if (parts.length) return parts.join(' / ')
+  const fallback = s.cert_mode === 'acme' ? s.domain || s.domain6 : s.reported_ipv4 || s.reported_ipv6 || s.reported_ip
+  return fallback ? `${wrap(fallback)}:${s.port}` : '待上报'
+}
+
+function v6Warn(s: ServerItem): string {
+  const v6 = s.ip_status?.ipv6
+  if (v6 && v6.enabled && !v6.active && v6.reported_ip && v6.error) return v6.error
+  return ''
+}
+
 const userRank = computed(() => {
   const arr = Object.entries(traffic.value.users)
     .map(([name, t]) => ({ name, total: (t?.up || 0) + (t?.down || 0) }))
@@ -177,25 +195,33 @@ async function loadAll() {
   }
 }
 
+let fastBusy = false
 async function pollFast() {
-  if (document.hidden) return
+  if (document.hidden || fastBusy) return
+  fastBusy = true
   try {
     const [tf, si] = await Promise.all([get<TrafficData>('/api/traffic'), get<SystemInfo>('/api/system')])
     traffic.value = tf
     sys.value = si
   } catch {
     /* 轮询失败静默，401 已由 request 处理 */
+  } finally {
+    fastBusy = false
   }
 }
 
+let slowBusy = false
 async function pollSlow() {
-  if (document.hidden) return
+  if (document.hidden || slowBusy) return
+  slowBusy = true
   try {
     const [s, sv] = await Promise.all([get<StatusData>('/api/status'), get<ServerItem[]>('/api/servers')])
     st.value = s
     servers.value = sv
   } catch {
     /* 同上 */
+  } finally {
+    slowBusy = false
   }
 }
 
@@ -304,7 +330,7 @@ onUnmounted(() => {
 
 .grid2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -358,6 +384,14 @@ onUnmounted(() => {
 .srv-line2 {
   font-size: 11.5px;
   margin-top: 2px;
+  word-break: break-all;
+  white-space: normal;
+}
+
+.srv-err {
+  color: var(--c-yellow);
+  font-size: 11.5px;
+  margin-top: 2px;
 }
 
 .srv-nums {
@@ -406,7 +440,7 @@ onUnmounted(() => {
 
 .rank-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 4px 24px;
 }
 

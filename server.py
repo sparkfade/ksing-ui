@@ -19,6 +19,7 @@ import hashlib
 import html
 import json
 import hmac
+import ipaddress
 import mimetypes
 import os
 import random
@@ -62,6 +63,7 @@ TOKEN_TTL = 7 * 86400
 BASE = os.environ.get("SBTOOL_DIR") or os.path.join(ROOT, "sbdata")
 
 PROC_LOCK = threading.RLock()  # 可重入: handler 持锁内还会调 sync_user_states
+RULESET_IO_LOCK = threading.Lock()  # 只串行化规则集联网/写目录, 绝不阻塞节点心跳锁
 
 
 # ------------------------------------------------------------------ helpers
@@ -114,9 +116,11 @@ def parse_token(token):
 
 
 def admin_ver():
-    """管理员凭据版本: 密码变更后旧会话全部失效"""
-    h = sbtool.get_settings(BASE).get("admin_pass_hash", "")
-    return hashlib.sha256(h.encode()).hexdigest()[:16] if h else ""
+    """管理员凭据版本: 用户名或密码变更后旧会话全部失效"""
+    s = sbtool.get_settings(BASE)
+    h = s.get("admin_pass_hash", "")
+    credential = h + "\0" + s.get("admin_user", "admin")
+    return hashlib.sha256(credential.encode()).hexdigest()[:16] if h else ""
 
 
 def check_session(user, role):
@@ -247,15 +251,37 @@ def auth_agent_install(headers):
 
 def touch_server(sid, **fields):
     """更新节点运行状态字段 (last_seen / applied_hash / reported_ip 等)"""
-    ip = fields.get("reported_ip")
-    if ip and ip.startswith("::ffff:"):
-        fields["reported_ip"] = ip[7:]  # IPv4-mapped IPv6 归一化
+    for key in ("reported_ip", "reported_ipv4", "reported_ipv6"):
+        ip = fields.get(key)
+        if ip and ip.startswith("::ffff:"):
+            fields[key] = ip[7:]  # IPv4-mapped IPv6 归一化
     P = sbtool.paths(BASE)
     with PROC_LOCK:
         servers = sbtool.load_servers(BASE)
         if sid not in servers:
             return
         servers[sid].update(fields)
+        sbtool.save_servers(BASE, servers)
+
+
+def note_config_users(sid, cfg):
+    """记录面板实际下发过的用户(90 天), 允许节点补报取消分配前产生的历史流量"""
+    try:
+        users = cfg["inbounds"][0]["users"]
+        names = [str(u["name"]) for u in users]
+    except (KeyError, IndexError, TypeError):
+        return
+    now = int(time.time())
+    with PROC_LOCK:
+        servers = sbtool.load_servers(BASE)
+        srv = servers.get(sid)
+        if not srv:
+            return
+        history = srv.get("config_users") or {}
+        for name in names:
+            history[name] = now
+        srv["config_users"] = {n: int(ts) for n, ts in history.items()
+                               if now - int(ts) < 90 * 86400}
         sbtool.save_servers(BASE, servers)
 
 
@@ -295,10 +321,12 @@ def _input_key(sid, srv):
         # 规则集内容变化必经 update 重写 catalog.json, 用其 mtime 代理数千个文件的 stat
         _KEY_CACHE.update(at=time.time(), key=tuple(g))
     return tuple(map(str, g)) + (str(srv.get("port")),
+                                 str(srv.get("users_mode") or ""),
                                  str(tuple(srv.get("users") or [])),
                                  str(bool(srv.get("enabled", True))),
-                                 str(srv.get("domain")), str(srv.get("cert_mode")),
-                                 str(srv.get("acme_email")))
+                                 str(srv.get("domain")), str(srv.get("domain6")),
+                                 str(srv.get("ip_mode")), str(srv.get("cert_mode")),
+                                 str(srv.get("acme_email")), sbtool.family_status_key(srv))
 
 
 def desired_hash(sid):
@@ -323,17 +351,24 @@ def server_view(sid, srv, traffic=None):
     t = (traffic or {}).get("servers", {}).get(sid, {})
     applied = srv.get("applied_hash", "")
     want = desired_hash(sid) if srv.get("enabled", True) else ""
+    ip_status = sbtool.server_family_status(srv)
     return {
         "sid": sid,
         "name": srv.get("name", sid),
         "port": srv.get("port"),
         "domain": srv.get("domain", ""),
+        "domain6": srv.get("domain6", ""),
+        "ip_mode": srv.get("ip_mode") or "dual",
         "cert_mode": srv.get("cert_mode") or "",
         "acme_email": srv.get("acme_email", ""),
         "cert_not_after": srv.get("cert_not_after", 0),
         "cert_issuer": srv.get("cert_issuer", ""),
         "reported_ip": srv.get("reported_ip") or "",
+        "reported_ipv4": srv.get("reported_ipv4") or "",
+        "reported_ipv6": srv.get("reported_ipv6") or "",
+        "ip_status": ip_status,
         "users": srv.get("users", []),
+        "users_mode": srv.get("users_mode") or ("selected" if srv.get("users") else "all"),
         "note": srv.get("note", ""),
         "enabled": bool(srv.get("enabled", True)),
         "created_at": srv.get("created_at", 0),
@@ -405,7 +440,7 @@ def sub_info_nodes(v):
 
 
 def user_nodes(name, u):
-    """用户可见节点详情 [{name, server, port, password, sni, insecure}]"""
+    """用户可见节点详情; 双栈节点拆成 IPv4/IPv6 两条订阅, 流量仍计入同一节点"""
     if not sbtool.user_active(BASE, name, u):
         return []
     s = sbtool.get_settings(BASE)
@@ -414,25 +449,33 @@ def user_nodes(name, u):
     for sid, srv in servers.items():
         if not srv.get("enabled", True):
             continue
-        assigned = srv.get("users") or []
-        if assigned and name not in assigned:
+        mode = srv.get("users_mode") or ("selected" if srv.get("users") else "all")
+        if mode == "none" or (mode == "selected" and name not in (srv.get("users") or [])):
             continue
-        addr = sbtool.server_addr(srv)
-        if not addr:
-            continue  # 节点尚未上报地址, 无法生成链接
-        sni = sbtool.server_sni(s, srv)
-        insecure = sbtool.server_insecure(srv)
-        q = "security=tls&type=tcp&headerType=none"
-        if sni:
-            q = "security=tls&sni=%s&type=tcp&headerType=none" % urllib.parse.quote(sni, safe="")
-        if insecure:
-            q += "&allowInsecure=1&insecure=1"
-        link = "anytls://%s@%s:%d?%s#%s" % (
-            urllib.parse.quote(u["password"], safe=""), addr, srv["port"], q,
-            urllib.parse.quote(srv.get("name", sid), safe=""))
-        out.append({"name": srv.get("name", sid), "server": addr, "port": srv["port"],
-                    "password": u["password"], "sni": sni, "insecure": insecure,
-                    "link": link})
+        status = sbtool.server_family_status(srv)
+        active = [family for family in ("ipv4", "ipv6")
+                  if status[family]["enabled"] and status[family]["active"] and status[family]["address"]]
+        for family in active:
+            addr = status[family]["address"]
+            sni = sbtool.server_sni(s, srv, family)
+            insecure = sbtool.server_insecure(srv)
+            q = "security=tls&type=tcp&headerType=none"
+            if sni:
+                q = "security=tls&sni=%s&type=tcp&headerType=none" % urllib.parse.quote(sni, safe="")
+            if insecure:
+                q += "&allowInsecure=1&insecure=1"
+            link_addr = "[%s]" % addr if ":" in addr and not addr.startswith("[") else addr
+            display_name = srv.get("name", sid)
+            if len(active) > 1:
+                display_name += " | " + ("IPv4" if family == "ipv4" else "IPv6")
+            link = "anytls://%s@%s:%d?%s#%s" % (
+                urllib.parse.quote(u["password"], safe=""), link_addr, srv["port"], q,
+                urllib.parse.quote(display_name, safe=""))
+            out.append({"sid": sid if len(active) == 1 else "%s-%s" % (sid, family),
+                        "server_sid": sid, "ip_version": family, "name": display_name,
+                        "server": addr, "port": srv["port"],
+                        "password": u["password"], "sni": sni, "insecure": insecure,
+                        "link": link})
     return out
 
 
@@ -508,8 +551,13 @@ def user_view(name, u, s, req_host="", scheme="http"):
     sub_url = sub_url_for(s, u["token"], req_host, scheme)
     tr = sbtool.effective_usage(BASE, name)
     servers = sbtool.load_servers(BASE)
-    member = [sid for sid, srv in servers.items()
-              if srv.get("enabled", True) and (not (srv.get("users") or []) or name in srv["users"])]
+
+    def assigned(srv):
+        mode = srv.get("users_mode") or ("selected" if srv.get("users") else "all")
+        return mode == "all" or (mode == "selected" and name in (srv.get("users") or []))
+
+    member = [sid for sid, srv in servers.items() if srv.get("enabled", True) and assigned(srv)]
+    assigned_servers = [sid for sid, srv in servers.items() if assigned(srv)]
     active = sbtool.user_active(BASE, name, u)
     return {
         "name": name,
@@ -523,6 +571,7 @@ def user_view(name, u, s, req_host="", scheme="http"):
         "link": links[0][1] if links else "",
         "links": [l for _, l in links],
         "servers": member,
+        "assigned_servers": assigned_servers,
         "sub_url": sub_url,
         "sub_urls": {"singbox": sub_url + "?type=singbox", "clash": sub_url + "?type=clash",
                      "v2ray": sub_url} if sub_url else {},
@@ -649,7 +698,7 @@ def h_nodes_add(ctx):
         node = {"type": "anytls",
                 "server": (b.get("server") or "").strip(),
                 "server_port": int(b.get("server_port") or 0),
-                "password": (b.get("password") or "").strip(),
+                "password": b.get("password") or "",
                 "sni": (b.get("sni") or "").strip(),
                 "insecure": bool(b.get("insecure"))}
     else:
@@ -682,9 +731,11 @@ def h_nodes_update(ctx):
         b = ctx.body
         node = nodes[tag]
         if node.get("type") == "anytls":
-            for k in ("server", "password", "sni"):
+            for k in ("server", "sni"):
                 if k in b:
                     node[k] = (b[k] or "").strip()
+            if "password" in b:
+                node["password"] = b["password"] or ""
             if "server_port" in b:
                 node["server_port"] = int(b["server_port"])
             if "insecure" in b:
@@ -701,14 +752,16 @@ def h_nodes_update(ctx):
                     node["udp_over_tcp"] = True
                 else:
                     node.pop("udp_over_tcp", None)
-            call_sbtool(sbtool.validate_node, node["method"], node["password"], node["server_port"])
+            call_sbtool(sbtool.validate_node, node["method"], node["password"],
+                        node["server_port"], node.get("plugin", ""))
         new_tag = (b.get("new_tag") or "").strip()
         if new_tag and new_tag != tag:
-            if new_tag in nodes or new_tag in ("direct", "block", "dns-out"):
+            call_sbtool(sbtool.validate_node_tag, new_tag)
+            if new_tag in nodes:
                 raise ApiError("新 tag 不可用")
             del nodes[tag]
             nodes[new_tag] = node
-            # 同步引用该 tag 的分流规则
+            # 同步引用该 tag 的分流规则和全局默认出站
             rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
             changed = False
             for r in rc.get("rules", []):
@@ -724,6 +777,10 @@ def h_nodes_update(ctx):
                     changed = True
             if changed:
                 sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+            settings = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+            if settings.get("final") == tag:
+                settings["final"] = new_tag
+                sbtool.save_json(sbtool.paths(BASE)["settings"], settings)
         sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"ok": True}
 
@@ -734,10 +791,12 @@ def h_nodes_del(ctx):
         nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
         if tag not in nodes:
             raise ApiError("节点不存在", 404)
-        # 检查引用
+        # 检查分流规则、用户默认出口和全局默认出站引用
         rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
+        settings = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
         refs = [i for i, r in enumerate(rc.get("rules", [])) if r.get("outbound") == tag]
-        if rc.get("final") == tag or tag in rc.get("user_final", {}).values() or refs:
+        if (rc.get("final") == tag or settings.get("final") == tag
+                or tag in rc.get("user_final", {}).values() or refs):
             raise ApiError("节点仍被分流规则/默认出口引用, 请先调整相关规则")
         del nodes[tag]
         sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
@@ -1011,7 +1070,7 @@ def _users_update_locked(name, b):
 
 def h_users_servers(ctx):
     """从用户视角分配节点: body {servers: [sid...]} 为该用户可见的节点集合。
-    节点 users 为空表示"全部用户", 排除某用户时转为显式列表。"""
+    节点分配为 all/selected/none 三态, 取消最后一个指定用户会进入 none, 不会误开放给全部。"""
     name = ctx.match.group(1)
     with PROC_LOCK:
         users = sbtool.load_users(BASE)
@@ -1024,15 +1083,16 @@ def h_users_servers(ctx):
             raise ApiError("节点不存在: %s" % ", ".join(sorted(unknown)))
         allnames = set(users.keys())
         for sid, srv in servers.items():
+            mode = srv.get("users_mode") or ("selected" if srv.get("users") else "all")
             cur = srv.get("users") or []
-            has_user = (not cur) or (name in cur)
+            has_user = mode == "all" or (mode == "selected" and name in cur)
             if sid in want and not has_user:
-                srv["users"] = cur + [name]
+                srv["users"] = cur + [name] if mode == "selected" else [name]
+                srv["users_mode"] = "selected"
             elif sid not in want and has_user:
-                if not cur:
-                    srv["users"] = sorted(allnames - {name})
-                else:
-                    srv["users"] = [u for u in cur if u != name]
+                remaining = sorted(allnames - {name}) if mode == "all" else [u for u in cur if u != name]
+                srv["users"] = remaining
+                srv["users_mode"] = "selected" if remaining else "none"
         sbtool.save_servers(BASE, servers)
     return 200, {"ok": True}
 
@@ -1065,12 +1125,15 @@ def _users_del_locked(name):
         raise ApiError("用户仍被分流规则/专属出口引用, 请先调整相关规则")
     del users[name]
     sbtool.save_users(BASE, users)
-    # 从所有节点的分配列表中移除
+    # 从所有节点的指定分配中移除; 移除后为空必须变成 none, 不能回到 all
     servers = sbtool.load_servers(BASE)
     changed = False
     for srv in servers.values():
-        if name in (srv.get("users") or []):
-            srv["users"] = [u for u in srv["users"] if u != name]
+        if srv.get("users_mode") == "selected" and name in (srv.get("users") or []):
+            remaining = [u for u in srv["users"] if u != name]
+            srv["users"] = remaining
+            if not remaining:
+                srv["users_mode"] = "none"
             changed = True
     if changed:
         sbtool.save_servers(BASE, servers)
@@ -1237,9 +1300,11 @@ def h_rulesets(ctx):
 
 
 def h_ruleset_index(ctx):
-    """手动构建/刷新上游规则集清单 (网络枚举 GitHub); 安装时也会预构建一次"""
-    with PROC_LOCK:
+    """手动构建/刷新上游规则集清单 (网络枚举 GitHub); 网络 I/O 不持全局锁"""
+    with RULESET_IO_LOCK:
         idx = call_sbtool(sbtool.build_ruleset_index, BASE, "", True)
+    if not idx:
+        raise ApiError("清单刷新失败: 所有来源均不可达, 已保留旧清单", 502)
     return 200, {"ok": True, "total": len(idx)}
 
 
@@ -1247,7 +1312,9 @@ def h_rulesets_download(ctx):
     tags = [str(t).strip() for t in (ctx.body.get("tags") or []) if str(t).strip()]
     if not tags:
         raise ApiError("需要 tags")
-    with PROC_LOCK:
+    if len(tags) > 100:
+        raise ApiError("单次最多下载 100 个规则集")
+    with RULESET_IO_LOCK:
         ok, fail = call_sbtool(sbtool.download_rulesets, BASE, tags)
     return 200, {"ok": ok, "fail": fail}
 
@@ -1358,6 +1425,16 @@ def _validate_server_payload(b, partial=False):
         if domain and not re.fullmatch(r"[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+", domain):
             raise ApiError("域名格式非法")
         out["domain"] = domain
+    if "domain6" in b:
+        domain6 = (b.get("domain6") or "").strip().lower()[:253]
+        if domain6 and not re.fullmatch(r"[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+", domain6):
+            raise ApiError("IPv6 域名格式非法")
+        out["domain6"] = domain6
+    if "ip_mode" in b or not partial:
+        ip_mode = str(b.get("ip_mode") or "dual")
+        if ip_mode not in ("dual", "ipv4", "ipv6"):
+            raise ApiError("网络模式非法: dual/ipv4/ipv6")
+        out["ip_mode"] = ip_mode
     if "cert_mode" in b or not partial:
         cm = (b.get("cert_mode") or "").strip()
         if not cm and not partial:
@@ -1372,6 +1449,11 @@ def _validate_server_payload(b, partial=False):
         if email and not re.fullmatch(r"[^@\s]+@[^@\s]+", email):
             raise ApiError("邮箱格式非法")
         out["acme_email"] = email
+    if "users_mode" in b:
+        mode = str(b.get("users_mode") or "")
+        if mode not in ("all", "selected", "none"):
+            raise ApiError("用户分配模式非法: 仅支持 all/selected/none")
+        out["users_mode"] = mode
     if "users" in b:
         ul = [str(u).strip() for u in (b.get("users") or []) if str(u).strip()]
         all_users = sbtool.load_users(BASE)
@@ -1379,11 +1461,32 @@ def _validate_server_payload(b, partial=False):
         if unknown:
             raise ApiError("用户不存在: %s" % ", ".join(unknown))
         out["users"] = ul
+        if "users_mode" not in b:
+            # 兼容旧前端: 空列表仍表示全部; 无用户必须显式 users_mode=none
+            out["users_mode"] = "selected" if ul else "all"
     if "note" in b:
         out["note"] = (b.get("note") or "")[:200]
     if "enabled" in b:
         out["enabled"] = bool(b["enabled"])
     return out
+
+
+def _validate_server_domain_plan(fields):
+    """域名/网络模式组合校验: IPv4 与 IPv6 使用不同域名, A/AAAA 状态由节点上报后动态判定"""
+    mode = fields.get("ip_mode") or "dual"
+    domain = fields.get("domain") or ""
+    domain6 = fields.get("domain6") or ""
+    if domain and domain6 and domain == domain6:
+        raise ApiError("IPv4 与 IPv6 域名不能相同")
+    if mode == "ipv4" and domain6:
+        raise ApiError("仅 IPv4 模式不能配置 IPv6 域名")
+    if mode == "ipv6" and domain:
+        raise ApiError("仅 IPv6 模式不能配置 IPv4 域名")
+    if fields.get("cert_mode") == "acme":
+        if mode != "ipv6" and not domain:
+            raise ApiError("acme 模式需要配置 IPv4 域名")
+        if mode == "ipv6" and not domain6:
+            raise ApiError("纯 IPv6 节点需要配置 IPv6 域名")
 
 
 def h_servers_list(ctx):
@@ -1394,8 +1497,7 @@ def h_servers_list(ctx):
 
 def h_servers_add(ctx):
     fields = _validate_server_payload(ctx.body)
-    if fields.get("cert_mode") == "acme" and not fields.get("domain"):
-        raise ApiError("acme 模式需要绑定域名")
+    _validate_server_domain_plan(fields)
     with PROC_LOCK:
         servers = sbtool.load_servers(BASE)
         sid = secrets.token_hex(4)
@@ -1403,7 +1505,8 @@ def h_servers_add(ctx):
             sid = secrets.token_hex(4)
         token = sbtool.gen_server_token()  # 一次性安装令牌 (激活时烧毁, 永久令牌届时生成)
         srv = {"install_hash": sbtool.hash_server_token(token),
-               "created_at": int(time.time()), "enabled": True}
+               "created_at": int(time.time()), "enabled": True,
+               "users": [], "users_mode": "all"}
         srv.update(fields)
         servers[sid] = srv
         sbtool.save_servers(BASE, servers)
@@ -1421,8 +1524,7 @@ def h_servers_update(ctx):
             raise ApiError("节点不存在", 404)
         merged = dict(servers[sid])
         merged.update(fields)
-        if merged.get("cert_mode") == "acme" and not merged.get("domain"):
-            raise ApiError("acme 模式需要绑定域名")
+        _validate_server_domain_plan(merged)
         servers[sid].update(fields)
         sbtool.save_servers(BASE, servers)
     return 200, {"ok": True}
@@ -1592,6 +1694,8 @@ def h_certs(ctx):
         out.append({
             "sid": sid, "name": srv.get("name", sid),
             "domain": srv.get("domain", ""),
+            "domain6": srv.get("domain6", ""),
+            "ip_status": sbtool.server_family_status(srv),
             "cert_mode": srv.get("cert_mode") or "",
             "issuer": srv.get("cert_issuer", ""),
             "not_after": exp, "days_left": days, "status": status,
@@ -1642,6 +1746,7 @@ def h_agent_config(ctx):
         # 即使配置未变也带上 agent 版本信息, 便于节点自更新
         return 200, {"unchanged": True, "hash": h, "agent_sha256": agent_py_sha256()}
     bundle = call_sbtool(sbtool.server_bundle, BASE, ctx.sid)
+    note_config_users(ctx.sid, bundle["config"])
     bundle["agent_sha256"] = agent_py_sha256()
     return 200, bundle
 
@@ -1725,13 +1830,43 @@ def h_agent_report(ctx):
     stats = b.get("stats")
     if not isinstance(stats, dict) or len(stats) > 10000:
         raise ApiError("stats 非法", 400)
+    report_id = str(b.get("report_id") or "")
+    if report_id and not re.fullmatch(r"[0-9a-f]{32}", report_id):
+        raise ApiError("report_id 非法", 400)
+    def clean_public_ip(value):
+        try:
+            addr = ipaddress.ip_address(str(value or ""))
+            return str(addr) if addr.is_global else ""
+        except ValueError:
+            return ""
+
+    has_family_fields = "public_ipv4" in b or "public_ipv6" in b
+    if has_family_fields:
+        reported_ipv4 = clean_public_ip(b.get("public_ipv4"))
+        reported_ipv6 = clean_public_ip(b.get("public_ipv6"))
+    else:
+        # 旧 agent 只上报 public_ip: 按地址族归类, 不清空另一族
+        legacy = clean_public_ip(b.get("public_ip"))
+        reported_ipv4 = legacy if legacy and "." in legacy else None
+        reported_ipv6 = legacy if legacy and ":" in legacy else None
+    # 反代后 TCP 对端可能是 nginx/回环地址; 优先采用经校验的 agent 自报公网 IP
+    reported_ip = reported_ipv4 or reported_ipv6 or ctx.client_ip
     # 心跳先行: 记账/状态维护等任何后续故障都不能把节点打成离线
     fields = {"last_seen": int(time.time()),
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
               "last_error": str(b.get("last_error") or "")[:300],
-              "sb_running": bool(b.get("sb_running")),
-              "reported_ip": ctx.client_ip}
+              "reported_ip": reported_ip}
+    if has_family_fields:
+        fields["reported_ipv4"] = reported_ipv4
+        fields["reported_ipv6"] = reported_ipv6
+    else:
+        if reported_ipv4 is not None:
+            fields["reported_ipv4"] = reported_ipv4
+        if reported_ipv6 is not None:
+            fields["reported_ipv6"] = reported_ipv6
+    if "sb_running" in b:  # 旧 agent 无此字段时保留未知, 不误报核心停止
+        fields["sb_running"] = bool(b.get("sb_running"))
     cert = b.get("cert")
     if isinstance(cert, dict):  # agent 上报的证书状态
         try:
@@ -1740,23 +1875,37 @@ def h_agent_report(ctx):
             pass
         fields["cert_issuer"] = str(cert.get("issuer") or "")[:128]
     touch_server(ctx.sid, **fields)
-    # 流量记账 best-effort: 只接受本节点真实分配的用户
+    # 流量记账: 当前分配 + 近 90 天实际下发过的用户; accounted=false 时 agent 按原 ID 重试
+    accounted = False
     try:
         allowed = set(sbtool.server_users(BASE, ctx.srv))
+        now = time.time()
+        for name, ts in (ctx.srv.get("config_users") or {}).items():
+            if now - int(ts) < 90 * 86400:
+                allowed.add(str(name))
         clean = {}
+        dropped = []
         for name, pair in stats.items():
             name = str(name)
-            if name not in allowed:
+            if not isinstance(pair, list) or len(pair) != 2:
                 continue
-            if isinstance(pair, list) and len(pair) == 2:
+            if name in allowed:
                 clean[name] = pair
-        sbtool.add_traffic(BASE, ctx.sid, clean)
-        note_report_rates(ctx.sid, clean)
+            else:
+                dropped.append(name)
+        if dropped and report_id:
+            # 不能过滤后仍确认: 否则取消分配等场景会把 pending 历史流量静默丢弃
+            return 200, {"ok": True, "accounted": False,
+                         "error": "报告含未分配用户: %s" % ",".join(sorted(dropped))[:200]}
+        applied = sbtool.add_traffic(BASE, ctx.sid, clean, report_id)
+        if applied:
+            note_report_rates(ctx.sid, clean)
         sbtool.sync_user_states(BASE, users_lock=PROC_LOCK)  # 维护 超额/到期/月重置
+        accounted = True
     except Exception:
         import traceback
         traceback.print_exc()  # report 流量记账失败不影响心跳
-    return 200, {"ok": True}
+    return 200, {"ok": True, "accounted": accounted}
 
 
 def h_agent_node_meta(ctx):
@@ -1764,6 +1913,8 @@ def h_agent_node_meta(ctx):
     return 200, {"sni": sbtool.server_sni(s, ctx.srv) or "anytls.example.com",
                  "name": ctx.srv.get("name", ctx.sid),
                  "domain": ctx.srv.get("domain", ""),
+                 "domain6": ctx.srv.get("domain6", ""),
+                 "ip_mode": ctx.srv.get("ip_mode") or "dual",
                  "cert_mode": ctx.srv.get("cert_mode") or "unsafe",
                  "port": ctx.srv.get("port")}
 
@@ -1940,11 +2091,34 @@ def sub_page(name, links, sub_url):
 
 # ------------------------------------------------------------------ 订阅格式渲染
 
+def tagged_subscription_nodes(nodes, reserved):
+    """为客户端配置生成唯一 tag; 显示名仍保留在 v2ray 链接中, 重名时追加稳定 sid"""
+    used = set(reserved)
+    out = []
+    for i, n in enumerate(nodes):
+        item = dict(n)
+        base = str(n.get("name") or "node")
+        tag = base
+        suffix = str(n.get("sid") or i)
+        if not base.strip() or tag in used:
+            tag = "%s [%s]" % (base.strip() or "node", suffix)
+        while tag in used:
+            tag += "_"
+        used.add(tag)
+        item["_tag"] = tag
+        out.append(item)
+    return out
+
+
 def render_clash(nodes):
     """mihomo/Clash 订阅: 完整配置, 与 sing-box 订阅等价的分流结构
     (sniff 嗅探 → 内网直连 → 国内域名直连 → 国外域名代理 → 国内IP直连 → 兜底代理),
     fakeip + DNS 防泄露 (未分类域名经代理解析, 直连解析走国内 DNS 不依赖代理)。
     规则集经代理下载 (proxy: 节点选择), 解决 GitHub 直连被墙导致规则下载失败、全部流量落 MATCH 的问题。"""
+    nodes = tagged_subscription_nodes(nodes, {"节点选择", "自动选择", "DIRECT"})
+    has_real = any(not n.get("socks") for n in nodes)
+    ns1 = "https://1.1.1.1/dns-query#节点选择" if has_real else "https://223.6.6.6/dns-query"
+    ns2 = "https://8.8.8.8/dns-query#节点选择" if has_real else "https://119.29.29.29/dns-query"
     lines = [
         "# ksing-ui 订阅 (mihomo)",
         "mixed-port: 7890",
@@ -1987,9 +2161,9 @@ def render_clash(nodes):
         "  default-nameserver:",     # 仅用于解析下面的 DoH 服务器域名
         "    - 223.5.5.5",
         "    - 119.29.29.29",
-        "  nameserver:",             # 兜底解析走代理加密 DNS: IP 规则 (cn-ip) 匹配触发的解析、
-        "    - https://1.1.1.1/dns-query#节点选择",  # 未分类域名 (dnsleak 测试的随机子域等) 不得查到国内 DNS
-        "    - https://8.8.8.8/dns-query#节点选择",
+        "  nameserver:",             # 有真实节点时走代理加密 DNS; 信息-only 时退化为国内 DoH
+        "    - " + ns1,
+        "    - " + ns2,
         "  proxy-server-nameserver:",  # 节点域名解析只用国内 DNS (代理未就绪时可用)
         "    - https://223.6.6.6/dns-query",
         "  direct-nameserver:",      # 直连出站 (DIRECT) 的域名解析走国内 DNS — 仅真正直连时使用,
@@ -1999,7 +2173,7 @@ def render_clash(nodes):
         "proxies:",
     ]
     for n in nodes:
-        lines.append("  - name: %s" % json.dumps(n["name"], ensure_ascii=False))
+        lines.append("  - name: %s" % json.dumps(n["_tag"], ensure_ascii=False))
         if n.get("socks"):  # 信息节点: 不可用, 名称即状态
             lines.append("    type: socks5")
             lines.append("    server: %s" % json.dumps(n["server"]))
@@ -2014,18 +2188,26 @@ def render_clash(nodes):
             lines.append("    sni: %s" % json.dumps(n["sni"]))
         lines.append("    skip-cert-verify: %s" % ("true" if n["insecure"] else "false"))
         lines.append("    udp: true")
-    names = [json.dumps(n["name"], ensure_ascii=False) for n in nodes]
+    names = [json.dumps(n["_tag"], ensure_ascii=False) for n in nodes]
+    real_names = [json.dumps(n["_tag"], ensure_ascii=False) for n in nodes if not n.get("socks")]
+    select_names = (["自动选择"] if real_names else []) + names
     lines += [
         "proxy-groups:",
         "  - name: 节点选择",
         "    type: select",
-        "    proxies: [自动选择%s]" % "".join(", " + x for x in names),
-        "  - name: 自动选择",
-        "    type: url-test",
-        "    url: http://www.gstatic.com/generate_204",
-        "    interval: 300",
-        "    proxies: [%s]" % ", ".join(names),
-        "rule-providers:",   # 全部经代理下载, 避免 GitHub 直连被墙导致规则为空
+        "    proxies: [%s]" % ", ".join(select_names or ["DIRECT"]),
+    ]
+    if real_names:
+        lines += [
+            "  - name: 自动选择",
+            "    type: url-test",
+            "    url: http://www.gstatic.com/generate_204",
+            "    interval: 300",
+            "    proxies: [%s]" % ", ".join(real_names),
+        ]
+    if real_names:
+        lines += [
+            "rule-providers:",   # 全部经代理下载, 避免 GitHub 直连被墙导致规则为空
         "  cn-site:",
         "    type: http",
         "    behavior: domain",
@@ -2070,28 +2252,48 @@ def render_clash(nodes):
         "  - RULE-SET,cn-ip,DIRECT",
         "  - MATCH,节点选择",
     ]
+    if not real_names:
+        # 信息-only: 不声明任何远程 rule-provider, 客户端可立即启动查看流量/到期状态
+        lines += [
+            "rules:",
+            "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+            "  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+            "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+            "  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+            "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+            "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+            "  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+            "  - IP-CIDR6,::1/128,DIRECT,no-resolve",
+            "  - IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+            "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+            "  - MATCH,节点选择",
+        ]
     return "\n".join(lines) + "\n"
 
 
 def render_singbox(nodes):
     """sing-box 完整客户端配置订阅 (等价分流: 国内直连/国外代理, DNS 国内外分离)"""
-    tags = [n["name"] for n in nodes]
-    # 信息节点 (socks 不可用) 不参与 urltest: 启动初期 urltest 未完成探测会选中死的信息节点,
-    # 规则集下载/全部流量挂死; 仅放入 selector 供用户查看状态
-    real_tags = [n["name"] for n in nodes if not n.get("socks")] or tags
-    outbounds = [
-        {"type": "selector", "tag": "selector", "outbounds": ["urltest"] + tags,
-         "default": "urltest"},
-        {"type": "urltest", "tag": "urltest", "outbounds": real_tags,
-         "url": "http://www.gstatic.com/generate_204", "interval": "3m"},
-    ]
+    nodes = tagged_subscription_nodes(nodes, {"selector", "urltest", "direct"})
+    tags = [n["_tag"] for n in nodes]
+    # 信息节点不参与 urltest; 没有真实节点时直接省略 urltest, 避免测速池只剩死节点
+    real_tags = [n["_tag"] for n in nodes if not n.get("socks")]
+    selector_outbounds = (["urltest"] if real_tags else []) + tags
+    if not selector_outbounds:
+        selector_outbounds = ["direct"]
+    outbounds = [{
+        "type": "selector", "tag": "selector", "outbounds": selector_outbounds,
+        "default": "urltest" if real_tags else selector_outbounds[0],
+    }]
+    if real_tags:
+        outbounds.append({"type": "urltest", "tag": "urltest", "outbounds": real_tags,
+                          "url": "http://www.gstatic.com/generate_204", "interval": "3m"})
     for n in nodes:
         if n.get("socks"):  # 信息节点: 不可用, 名称即状态
-            outbounds.append({"type": "socks", "tag": n["name"],
+            outbounds.append({"type": "socks", "tag": n["_tag"],
                               "server": n["server"], "server_port": n["port"]})
             continue
         outbounds.append({
-            "type": "anytls", "tag": n["name"],
+            "type": "anytls", "tag": n["_tag"],
             "server": n["server"], "server_port": n["port"],
             "password": n["password"],
             "tls": {"enabled": True, "server_name": n["sni"], "insecure": n["insecure"]},
@@ -2155,16 +2357,31 @@ def render_singbox(nodes):
                 {"ip_is_private": True, "action": "route", "outbound": "direct"},
                 {"rule_set": "geosite-cn", "action": "route", "outbound": "direct"},
                 {"rule_set": "ext-cn-domain", "action": "route", "outbound": "direct"},
-                {"rule_set": "geosite-!cn", "action": "route", "outbound": "urltest"},
+                {"rule_set": "geosite-!cn", "action": "route", "outbound": "selector"},
                 {"action": "resolve", "strategy": "prefer_ipv4"},
                 {"type": "logical", "mode": "and",
                  "rules": [{"rule_set": "geoip-cn"},
                            {"rule_set": "geosite-!cn", "invert": True}],
                  "action": "route", "outbound": "direct"},
             ],
-            "final": "urltest",
+            "final": "selector",
         },
     }
+    if not real_tags:
+        # 信息-only 订阅: 去掉远程规则集/代理 DNS 等启动依赖, 客户端可立即启动查看状态;
+        # 最终流量仍走 selector 中的不可用信息节点, 保持 fail-closed 而非偷偷直连。
+        cfg["dns"] = {
+            "servers": [{"type": "udp", "tag": "local", "server": "223.5.5.5", "server_port": 53}],
+            "rules": [], "final": "local", "strategy": "prefer_ipv4", "disable_cache": True,
+        }
+        cfg.pop("http_clients", None)
+        cfg["route"].pop("default_http_client", None)
+        cfg["route"]["rule_set"] = []
+        cfg["route"]["rules"] = [
+            {"action": "sniff"},
+            {"protocol": "dns", "action": "hijack-dns"},
+            {"ip_is_private": True, "action": "route", "outbound": "direct"},
+        ]
     return json.dumps(cfg, ensure_ascii=False, indent=2)
 
 
@@ -2246,6 +2463,19 @@ class Ctx:
         self.match = match
         self.headers = handler.headers
         self.client_ip = handler.client_address[0]
+
+
+class DecodedMatch:
+    """路由先匹配原始 URL path, 捕获段再解码: 兼容旧数据中包含 / 的 tag"""
+
+    def __init__(self, match):
+        self._match = match
+
+    def group(self, *args):
+        value = self._match.group(*args)
+        if isinstance(value, tuple):
+            return tuple(urllib.parse.unquote(v) if v is not None else None for v in value)
+        return urllib.parse.unquote(value) if value is not None else None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2374,7 +2604,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self):
         parsed = urllib.parse.urlparse(self.path)
-        path = urllib.parse.unquote(parsed.path)  # 解码中文 tag/用户名 (前端 encodeURIComponent)
+        raw_path = parsed.path
+        path = urllib.parse.unquote(raw_path)  # agent/订阅/静态路径使用解码后的 path
         query = urllib.parse.parse_qs(parsed.query)
         query = {k: v[0] for k, v in query.items()}
 
@@ -2395,7 +2626,7 @@ class Handler(BaseHTTPRequestHandler):
             for method, pattern, fn, role in ROUTES:
                 if method != self.command:
                     continue
-                m = re.fullmatch(pattern, path)
+                m = re.fullmatch(pattern, raw_path)
                 if not m:
                     continue
                 user = None
@@ -2413,7 +2644,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
                 if self.command in ("POST", "PUT", "DELETE"):
                     body = self.read_body(64 * 1024 if role is None else 4 * 1024 * 1024)
-                ctx = Ctx(self, body, query, user, m)
+                ctx = Ctx(self, body, query, user, DecodedMatch(m))
                 code, obj = fn(ctx)
                 self.send_json(code, obj)
                 return
@@ -2535,7 +2766,7 @@ AGENT_ROUTES_INSTALL = [  # Bearer 一次性安装令牌认证 (仅激活兑换)
 AGENT_ROUTES = [  # Bearer 节点 token 认证
     ("GET", r"/agent/config", h_agent_config),
     ("GET", r"/agent/node-meta", h_agent_node_meta),
-    ("GET", r"/agent/ruleset/([A-Za-z0-9_.\-]{1,128})", h_agent_ruleset),
+    ("GET", r"/agent/ruleset/(.{1,256})", h_agent_ruleset),
     ("GET", r"/agent/binary/(amd64|arm64)", h_agent_binary),
     ("GET", r"/agent/agent\.py", h_agent_agentpy),
     ("POST", r"/agent/report", h_agent_report),

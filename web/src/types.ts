@@ -36,10 +36,20 @@ export interface UserInfo {
   sub_urls?: SubUrls
   traffic?: TrafficStat
   servers?: string[]
+  assigned_servers?: string[]
   active?: boolean
   traffic_limit?: number
   expire_at?: number
   reset_day?: number
+}
+
+export interface FamilyStatus {
+  enabled: boolean
+  active: boolean
+  reported_ip: string
+  domain: string
+  error: string
+  address: string
 }
 
 export interface ServerItem {
@@ -47,7 +57,13 @@ export interface ServerItem {
   name: string
   port: number
   reported_ip: string
+  domain6: string
+  ip_mode: 'dual' | 'ipv4' | 'ipv6'
+  reported_ipv4: string
+  reported_ipv6: string
+  ip_status?: { ipv4: FamilyStatus; ipv6: FamilyStatus }
   users: string[]
+  users_mode: 'all' | 'selected' | 'none'
   note: string
   enabled: boolean
   created_at: number
@@ -76,7 +92,7 @@ export interface ServerCreated {
 export interface ServerConfigPreview {
   hash: string
   config: Record<string, unknown>
-  rulesets: unknown[]
+  rulesets: Array<{ tag: string }>
 }
 
 export interface RateStat {
@@ -105,6 +121,8 @@ export interface CertItem {
   sid: string
   name: string
   domain: string
+  domain6: string
+  ip_status?: { ipv4: FamilyStatus; ipv6: FamilyStatus }
   cert_mode: '' | 'acme' | 'selfip' | 'unsafe'
   issuer: string
   not_after: number

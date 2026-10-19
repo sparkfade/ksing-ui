@@ -23,16 +23,23 @@ const ok = ref(false)
 
 async function copy() {
   try {
+    if (!navigator.clipboard) throw new Error('no clipboard')
     await navigator.clipboard.writeText(props.text)
   } catch {
-    const ta = document.createElement('textarea')
-    ta.value = props.text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    ta.remove()
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = props.text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const copied = document.execCommand('copy')
+      ta.remove()
+      if (!copied) throw new Error('execCommand returned false')
+    } catch {
+      toast('复制失败，请手动选择文本复制', 'error')
+      return
+    }
   }
   ok.value = true
   if (!props.label) toast('已复制', 'success')

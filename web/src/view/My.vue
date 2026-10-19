@@ -50,7 +50,7 @@
         <template v-if="subEntries.length">
           <div class="sub-list">
             <div v-for="e in subEntries" :key="e.key" class="sub-line">
-              <span class="sub-label" :class="{ active: qrKey === e.key }" @click="qrKey = e.key">{{ e.label }}</span>
+              <button type="button" class="sub-label" :class="{ active: qrKey === e.key }" :aria-pressed="qrKey === e.key" @click="qrKey = e.key">{{ e.label }}</button>
               <CodeBox :text="e.url" class="sub-box" />
               <CopyButton :text="e.url" label="复制" />
             </div>
@@ -99,7 +99,7 @@
           <Input v-model="newPwd" label="新密码" hint="至少 6 位" type="password" placeholder="新密码" />
         </div>
         <div class="row foot">
-          <span class="muted note">修改后需要重新登录，其他已登录会话立即失效。</span>
+          <span class="muted note">修改后当前会话保持登录，其他已登录会话立即失效。</span>
           <Button variant="primary" :loading="saving" @click="changePwd">修改密码</Button>
         </div>
       </div>
@@ -309,9 +309,12 @@ onMounted(load)
   width: 104px;
   flex-shrink: 0;
   font-size: 12.5px;
+  font-family: var(--font);
+  text-align: left;
+  background: none;
   color: var(--c-text-dim);
   cursor: pointer;
-  padding: 3px 8px;
+  padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid transparent;
   transition: all 0.15s var(--ease);
@@ -365,6 +368,8 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  word-break: break-all;
 }
 
 /* 密码 */
