@@ -88,7 +88,7 @@ def get_secret():
     if s.get("panel_secret"):
         return s["panel_secret"]
     secret = b64url(os.urandom(32))
-    raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+    raw = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
     raw["panel_secret"] = secret
     sbtool.save_json(sbtool.paths(BASE)["settings"], raw)
     return secret
@@ -608,7 +608,7 @@ def h_setup(ctx):
     if len(password) < 6:
         raise ApiError("密码至少 6 位")
     with PROC_LOCK:  # 防并发重复初始化
-        raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+        raw = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
         if raw.get("admin_pass_hash"):
             raise ApiError("管理员已初始化", 403)
         raw["admin_user"] = username
@@ -647,12 +647,12 @@ def h_login(ctx):
 def h_status(ctx):
     s = sbtool.get_settings(BASE)
     users = sbtool.load_users(BASE)
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+    nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
     servers = sbtool.load_servers(BASE)
     online = sum(1 for sv in servers.values()
                  if sv.get("last_seen") and time.time() - sv["last_seen"] < 120)
-    rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": []})
-    cat = sbtool.load_json(sbtool.paths(BASE)["catalog"], {})
+    rc = sbtool.load_json_strict(sbtool.paths(BASE)["routes"], {"rules": []})
+    cat = sbtool.load_json_strict(sbtool.paths(BASE)["catalog"], {})
     return 200, {
         "counts": {"users": len(users), "nodes": len(nodes),
                    "servers": len(servers), "servers_online": online,
@@ -665,7 +665,7 @@ def h_status(ctx):
 # ---- nodes
 
 def h_nodes_list(ctx):
-    return 200, sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+    return 200, sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
 
 
 def h_nodes_parse(ctx):
@@ -719,7 +719,7 @@ def h_nodes_add(ctx):
             node["plugin"] = b["plugin"]
             node["plugin_opts"] = b.get("plugin_opts", "")
     with PROC_LOCK:
-        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
         call_sbtool(sbtool.add_node, nodes, tag, node, force=bool(b.get("force")))
         sbtool.save_json(sbtool.paths(BASE)["nodes"], nodes)
     return 200, {"ok": True}
@@ -728,7 +728,7 @@ def h_nodes_add(ctx):
 def h_nodes_update(ctx):
     tag = ctx.match.group(1)
     with PROC_LOCK:
-        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
         if tag not in nodes:
             raise ApiError("节点不存在", 404)
         b = ctx.body
@@ -765,7 +765,7 @@ def h_nodes_update(ctx):
             del nodes[tag]
             nodes[new_tag] = node
             # 同步引用该 tag 的分流规则和全局默认出站
-            rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
+            rc = sbtool.load_json_strict(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
             changed = False
             for r in rc.get("rules", []):
                 if r.get("outbound") == tag:
@@ -780,7 +780,7 @@ def h_nodes_update(ctx):
                     changed = True
             if changed:
                 sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
-            settings = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+            settings = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
             if settings.get("final") == tag:
                 settings["final"] = new_tag
                 sbtool.save_json(sbtool.paths(BASE)["settings"], settings)
@@ -791,12 +791,12 @@ def h_nodes_update(ctx):
 def h_nodes_del(ctx):
     tag = ctx.match.group(1)
     with PROC_LOCK:
-        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
         if tag not in nodes:
             raise ApiError("节点不存在", 404)
         # 检查分流规则、用户默认出口和全局默认出站引用
-        rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
-        settings = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+        rc = sbtool.load_json_strict(sbtool.paths(BASE)["routes"], {"rules": [], "final": None, "user_final": {}})
+        settings = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
         refs = [i for i, r in enumerate(rc.get("rules", [])) if r.get("outbound") == tag]
         if (rc.get("final") == tag or settings.get("final") == tag
                 or tag in rc.get("user_final", {}).values() or refs):
@@ -918,7 +918,7 @@ def _test_tcp(tag, node):
 
 def h_nodes_test(ctx):
     tag = ctx.match.group(1)
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+    nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
     if tag not in nodes:
         raise ApiError("节点不存在", 404)
     sb_bin = find_singbox()
@@ -935,7 +935,7 @@ def h_nodes_import(ctx):
         raise ApiError("未找到 ss:// 或 anytls:// 链接")
     results = []
     with PROC_LOCK:
-        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
         for link in links:
             try:
                 if link.lower().startswith("anytls://"):
@@ -1122,7 +1122,7 @@ def _users_del_locked(name):
     users = sbtool.load_users(BASE)
     if name not in users:
         raise ApiError("用户不存在", 404)
-    rc = sbtool.load_json(sbtool.paths(BASE)["routes"], {"rules": [], "user_final": {}})
+    rc = sbtool.load_json_strict(sbtool.paths(BASE)["routes"], {"rules": [], "user_final": {}})
     refs = [i for i, r in enumerate(rc.get("rules", [])) if name in (r.get("users") or [])]
     if refs or name in rc.get("user_final", {}):
         raise ApiError("用户仍被分流规则/专属出口引用, 请先调整相关规则")
@@ -1146,7 +1146,7 @@ def _users_del_locked(name):
 # ---- routes
 
 def routes_data():
-    rc = sbtool.load_json(sbtool.paths(BASE)["routes"],
+    rc = sbtool.load_json_strict(sbtool.paths(BASE)["routes"],
                           {"rules": [], "final": None, "user_final": {}})
     rc.setdefault("rules", [])
     rc.setdefault("user_final", {})
@@ -1165,7 +1165,7 @@ def h_routes_add(ctx):
     entry = {}
     if b.get("rule_set"):
         sets = [t for t in b["rule_set"] if t]
-        cat = sbtool.load_json(sbtool.paths(BASE)["catalog"], {})
+        cat = sbtool.load_json_strict(sbtool.paths(BASE)["catalog"], {})
         missing = [t for t in sets if t not in cat]
         if missing:
             raise ApiError("规则集不存在: %s" % ", ".join(missing))
@@ -1198,7 +1198,7 @@ def h_routes_add(ctx):
         entry["action"] = "reject"
     else:
         outbound = (b.get("outbound") or "").strip()
-        nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+        nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
         if outbound != "direct" and outbound not in nodes:
             raise ApiError("出站不存在: %s" % outbound)
         entry["action"] = "route"
@@ -1241,7 +1241,7 @@ def h_routes_final(ctx):
     b = ctx.body
     outbound = (b.get("outbound") or "").strip()
     user = (b.get("user") or "").strip()
-    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+    nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
     if outbound not in ("direct", "reject") and outbound not in nodes:
         raise ApiError("出站不存在: %s" % outbound)
     if user:
@@ -1275,8 +1275,8 @@ def h_routes_final_del(ctx):
 def h_rulesets(ctx):
     q = (ctx.query.get("q") or "").lower()
     source = ctx.query.get("source") or ""
-    cat = sbtool.load_json(sbtool.paths(BASE)["catalog"], {})
-    idx = sbtool.load_json(os.path.join(BASE, "ruleset_index.json"), {})
+    cat = sbtool.load_json_strict(sbtool.paths(BASE)["catalog"], {})
+    idx = sbtool.load_json_strict(os.path.join(BASE, "ruleset_index.json"), {})
     # 合并: 已下载 (catalog) + 上游清单 (index, 含未下载), 标记 downloaded
     merged = {}
     for tag, ent in cat.items():
@@ -1347,7 +1347,7 @@ def h_settings_put(ctx):
     b = ctx.body
     with PROC_LOCK:  # load-modify-save 需串行化, 防并发 PUT 丢更新 (含 cf_api_token)
         s = sbtool.get_settings(BASE)
-        raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+        raw = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
         old_cf_token = raw.get("cf_api_token") or ""
         old_cf_account = raw.get("cf_account_id") or ""
         for k in SETTINGS_EDITABLE:
@@ -1366,7 +1366,7 @@ def h_settings_put(ctx):
                 if k == "private_action" and v not in ("reject", "direct", "off"):
                     raise ApiError("private_action 非法")
                 if k == "final":
-                    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+                    nodes = sbtool.load_json_strict(sbtool.paths(BASE)["nodes"], {})
                     if v not in ("direct", "reject") and v not in nodes:
                         raise ApiError("默认出站不存在: %s" % v)
                 if k == "sni" and v and not re.fullmatch(r"[A-Za-z0-9.\-]{1,128}", str(v)):
@@ -1426,7 +1426,7 @@ def h_settings_admin(ctx):
     s = sbtool.get_settings(BASE)
     if not sbtool.verify_password(b.get("old_password") or "", s.get("admin_pass_hash", "")):
         raise ApiError("原密码错误", 403)
-    raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+    raw = sbtool.load_json_strict(sbtool.paths(BASE)["settings"], {})
     new_name = (b.get("new_username") or "").strip() or s.get("admin_user", "admin")
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,32}", new_name):
         raise ApiError("用户名仅限字母/数字/_/-, 1-32 位")
@@ -1683,6 +1683,8 @@ def h_servers_del(ctx):
                 changed = True
         if changed:
             sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
+        with _RATES_LOCK:
+            _RATES["servers"].pop(sid, None)
     if srv.get("dns_managed"):
         threading.Thread(target=_dns_cleanup_bg, args=(srv, sid), daemon=True).start()
     return 200, {"ok": True}
@@ -1767,7 +1769,8 @@ def h_servers_dns_sync(ctx):
 # ------------------------------------------------------------------ 实时带宽速率
 
 _RATES_LOCK = threading.Lock()
-_RATES = {"total": {"at": 0, "rate_up": 0.0, "rate_down": 0.0}, "servers": {}}
+_RATES = {"servers": {}}
+MIN_RATE_INTERVAL = 2.0  # 连续重试/重启前快照不重复制造速率尖峰
 
 
 def note_report_rates(sid, clean):
@@ -1776,25 +1779,52 @@ def note_report_rates(sid, clean):
     up = sum(p[0] for p in clean.values())
     down = sum(p[1] for p in clean.values())
     with _RATES_LOCK:
-        for key in ("total", sid):
-            cur = _RATES["total"] if key == "total" else _RATES["servers"].setdefault(
-                key, {"at": 0, "rate_up": 0.0, "rate_down": 0.0})
-            if cur["at"]:
-                dt = max(now - cur["at"], 1.0)
-                cur["rate_up"] = up / dt
-                cur["rate_down"] = down / dt
-            cur["at"] = now
+        cur = _RATES["servers"].setdefault(sid, {
+            "at": 0, "rate_up": 0.0, "rate_down": 0.0,
+            "pending_up": 0, "pending_down": 0,
+        })
+        if cur["at"]:
+            dt = now - cur["at"]
+            if dt < MIN_RATE_INTERVAL:
+                cur["pending_up"] += up
+                cur["pending_down"] += down
+                return
+            up += cur["pending_up"]
+            down += cur["pending_down"]
+            cur["pending_up"] = 0
+            cur["pending_down"] = 0
+            cur["rate_up"] = up / dt
+            cur["rate_down"] = down / dt
+        cur["at"] = now
 
 
 def current_rates():
+    """返回各节点速率及其总和。
+
+    总速率必须由所有节点速率相加得到；若拿“最近一次上报的增量”当总量，
+    多节点交错上报时会把其他节点的流量漏掉，产生明显跳动。
+    """
     now = time.time()
     with _RATES_LOCK:
         def pack(r):
             if not r["at"] or now - r["at"] > 90:  # 超过 90 秒没上报, 速率归零
-                return {"rate_up": 0.0, "rate_down": 0.0}
-            return {"rate_up": round(r["rate_up"], 1), "rate_down": round(r["rate_down"], 1)}
-        return {"total": pack(_RATES["total"]),
-                "servers": {sid: pack(r) for sid, r in _RATES["servers"].items()}}
+                return {"rate_up": 0.0, "rate_down": 0.0, "sampled_at": 0}
+            return {"rate_up": r["rate_up"], "rate_down": r["rate_down"],
+                    "sampled_at": int(r["at"] * 1000)}
+        packed = {sid: pack(r) for sid, r in _RATES["servers"].items()}
+        total_up = sum(r["rate_up"] for r in packed.values())
+        total_down = sum(r["rate_down"] for r in packed.values())
+        return {
+            "total": {"rate_up": round(total_up, 1), "rate_down": round(total_down, 1),
+                      "sampled_at": max((r["sampled_at"] for r in packed.values()),
+                                        default=0)},
+            "servers": {
+                sid: {"rate_up": round(r["rate_up"], 1),
+                      "rate_down": round(r["rate_down"], 1),
+                      "sampled_at": r["sampled_at"]}
+                for sid, r in packed.items()
+            },
+        }
 
 
 # ------------------------------------------------------------------ 系统状态 (3x-ui 风格)
@@ -1948,7 +1978,7 @@ def agent_py_sha256():
 
 def h_agent_ruleset(ctx):
     tag = ctx.match.group(1)
-    cat = sbtool.load_json(sbtool.paths(BASE)["catalog"], {})
+    cat = sbtool.load_json_strict(sbtool.paths(BASE)["catalog"], {})
     ent = cat.get(tag)
     if not ent:
         raise ApiError("规则集不存在", 404)
@@ -2004,6 +2034,23 @@ def h_agent_ca(ctx):
     _, cert, _ = agent_cert_paths()
     with open(cert, "rb") as f:
         return 200, Raw(f.read(), "application/x-pem-file")
+
+
+MAX_TRAFFIC_BYTES = 1 << 60
+
+
+def clean_traffic_pair(pair):
+    """只接受 JSON 整数; 拒绝 bool/float/NaN/Infinity/负数和超上限值。"""
+    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+        return None
+    up, down = pair
+    if isinstance(up, bool) or isinstance(down, bool):
+        return None
+    if not isinstance(up, int) or not isinstance(down, int):
+        return None
+    if up < 0 or down < 0 or up > MAX_TRAFFIC_BYTES or down > MAX_TRAFFIC_BYTES:
+        return None
+    return [up, down]
 
 
 def h_agent_report(ctx):
@@ -2072,28 +2119,27 @@ def h_agent_report(ctx):
     # 节点上报了公网 IP: dns_managed 节点据此在中控侧创建/更新 Cloudflare 记录
     if ctx.srv.get("dns_managed") and ctx.srv.get("cert_mode") == "acme":
         maybe_dns_sync(ctx.sid)
-    # 流量记账: 当前分配 + 近 90 天实际下发过的用户; accounted=false 时 agent 按原 ID 重试
+    # 流量记账: 已知用户 + 近 90 天实际下发过的用户。未知名只忽略该用户，
+    # 不能让一个已删除/伪造用户名阻塞整批正常流量.
     accounted = False
+    ignored = []
     try:
         allowed = set(sbtool.server_users(BASE, ctx.srv))
         now = time.time()
-        for name, ts in (ctx.srv.get("config_users") or {}).items():
+        history = ctx.srv.get("config_users") or {}
+        for name, ts in history.items():
             if now - int(ts) < 90 * 86400:
                 allowed.add(str(name))
         clean = {}
-        dropped = []
         for name, pair in stats.items():
             name = str(name)
-            if not isinstance(pair, list) or len(pair) != 2:
+            pair = clean_traffic_pair(pair)
+            if pair is None:
                 continue
             if name in allowed:
                 clean[name] = pair
             else:
-                dropped.append(name)
-        if dropped and report_id:
-            # 不能过滤后仍确认: 否则取消分配等场景会把 pending 历史流量静默丢弃
-            return 200, {"ok": True, "accounted": False,
-                         "error": "报告含未分配用户: %s" % ",".join(sorted(dropped))[:200]}
+                ignored.append(name)
         applied = sbtool.add_traffic(BASE, ctx.sid, clean, report_id)
         if applied:
             note_report_rates(ctx.sid, clean)
@@ -2102,7 +2148,10 @@ def h_agent_report(ctx):
     except Exception:
         import traceback
         traceback.print_exc()  # report 流量记账失败不影响心跳
-    return 200, {"ok": True, "accounted": accounted}
+    out = {"ok": True, "accounted": accounted}
+    if ignored:
+        out["ignored_users"] = sorted(ignored)[:200]
+    return 200, out
 
 
 def h_agent_node_meta(ctx):

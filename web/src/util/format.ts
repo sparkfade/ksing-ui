@@ -17,6 +17,11 @@ export function fmtBytes(n?: number): string {
   return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
 }
 
+export function fmtBytesParts(n?: number): { value: string; unit: string } {
+  const [value, ...unit] = fmtBytes(n).split(' ')
+  return { value, unit: unit.join(' ') }
+}
+
 export function fmtAgo(ts?: number): string {
   if (!ts) return '从未'
   const diff = Math.floor(Date.now() / 1000 - ts)

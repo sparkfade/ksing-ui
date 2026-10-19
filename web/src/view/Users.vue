@@ -30,7 +30,7 @@
             <tr v-for="u in users" :key="u.name">
               <td>
                 <Badge>{{ u.name }}</Badge>
-                <div v-if="u.note" class="faint" style="font-size: 11.5px; margin-top: 3px">{{ u.note }}</div>
+                <div v-if="u.note" class="faint meta-line note-clip" :title="u.note">{{ u.note }}</div>
               </td>
               <td><Badge :color="userStatus(u).color">{{ userStatus(u).text }}</Badge></td>
               <td>
@@ -44,14 +44,14 @@
               <td class="mono" :class="{ 'over-red': isExpired(u) }">{{ u.expire_at ? fmtTime(u.expire_at) : '永久' }}</td>
               <td class="muted">{{ u.reset_day ? `每月 ${u.reset_day} 号` : '不重置' }}</td>
               <td>
-                <div class="row" style="gap: 6px">
+                <div class="row tight">
                   <span class="mono muted">{{ u.token.slice(0, 6) }}…</span>
                   <CopyButton :text="u.token" small />
                 </div>
               </td>
               <td><Toggle :model-value="u.enable" @update:model-value="toggleEnable(u, $event)" /></td>
               <td>
-                <div class="row" style="gap: 6px">
+                <div class="row tight">
                   <Button small @click="openLink(u)">订阅</Button>
                   <Button small @click="openEdit(u)">编辑</Button>
                   <Button small @click="openRoute(u)">分流</Button>
@@ -87,7 +87,7 @@
     <Drawer v-model:visible="linkVisible" :title="`订阅 · ${current?.name ?? ''}`">
       <template v-if="current">
         <h4 class="sec">AnyTLS 密码</h4>
-        <div class="row" style="gap: 6px">
+        <div class="row tight">
           <span class="mono">{{ revealed.has(current.name) ? current.password : '••••••••' }}</span>
           <button class="eye" @click="toggleReveal(current.name)">{{ revealed.has(current.name) ? '隐藏' : '显示' }}</button>
           <CopyButton :text="current.password" small />
@@ -145,8 +145,8 @@
           <Badge v-if="userFinal" :color="userFinal === 'reject' ? 'red' : userFinal === 'direct' ? 'dim' : 'cyan'">{{ userFinal }}</Badge>
           <Badge v-else color="dim">跟随全局</Badge>
         </div>
-        <div class="row" style="margin-top: 10px">
-          <Select v-model="ufOutbound" :options="outboundOptions" style="flex: 1" />
+        <div class="toolbar" style="margin-top: 10px">
+          <Select v-model="ufOutbound" :options="outboundOptions" class="field" />
           <Button small variant="primary" :loading="ufSaving" @click="saveFinal">保存</Button>
           <Button v-if="userFinal" small variant="danger" :loading="ufSaving" @click="delFinal">删除</Button>
         </div>
@@ -649,6 +649,13 @@ onMounted(load)
 
 .use-txt {
   font-size: 11.5px;
+}
+
+.note-clip {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .over-red {

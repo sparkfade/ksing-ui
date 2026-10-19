@@ -13,7 +13,7 @@ withDefaults(
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding: 2px 10px;
   border-radius: 20px;
   font-size: 12px;

@@ -91,14 +91,19 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--c-border);
 }
 
 .head h3 {
+  min-width: 0;
   margin: 0;
   font-size: 15.5px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .x {
@@ -130,6 +135,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .draw-enter-active,

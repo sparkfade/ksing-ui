@@ -419,7 +419,7 @@ onMounted(load)
   border-radius: 10px;
   padding: 12px;
   margin-bottom: 14px;
-  background: var(--c-bg-soft, transparent);
+  background: var(--c-inset);
 }
 
 .parse-title {
@@ -489,14 +489,14 @@ onMounted(load)
 }
 
 .test-ok {
-  color: var(--c-green, #16a34a);
+  color: var(--c-green);
   font-size: 12.5px;
   font-weight: 500;
   cursor: default;
 }
 
 .test-fail {
-  color: var(--c-red, #dc2626);
+  color: var(--c-red);
   font-size: 12.5px;
   font-weight: 500;
   cursor: help;

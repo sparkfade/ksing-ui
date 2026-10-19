@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -129,14 +130,53 @@ def load_json(path, default):
     except (OSError, ValueError):
         return default
 
+
+def load_json_strict(path, default):
+    """用于写前读取: 不存在返回 default, 损坏/不可读则失败, 防止覆盖历史数据。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as e:
+        raise RuntimeError("数据文件损坏或不可读: %s" % path) from e
+
+
 def save_json(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.chmod(tmp, 0o600)  # 数据文件含密码/凭据, 仅属主可读写
-    os.replace(tmp, path)
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp", dir=d)
+    replaced = False
+    try:
+        os.fchmod(fd, 0o600)  # 数据文件含密码/凭据, 临时文件也必须仅属主可读写
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        replaced = True
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not replaced:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    try:
+        dfd = os.open(d, os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except (OSError, AttributeError):
+        pass
 
 def die(msg, code=1):
     print("错误: %s" % msg, file=sys.stderr)
@@ -204,7 +244,7 @@ DEFAULT_SETTINGS = {
 
 def get_settings(base):
     s = dict(DEFAULT_SETTINGS)
-    s.update(load_json(paths(base)["settings"], {}))
+    s.update(load_json_strict(paths(base)["settings"], {}))
     return s
 
 # ---------------------------------------------------------------- update
@@ -707,7 +747,7 @@ def verify_password(pw, stored):
 def load_users(base):
     """读取 users.json 并归一化为 {name: {password, enable, token, panel_password_hash, note, created_at}};
     兼容旧格式 {name: "密码字符串"}"""
-    raw = load_json(paths(base)["users"], {})
+    raw = load_json_strict(paths(base)["users"], {})
     out = {}
     for name, v in raw.items():
         if isinstance(v, str):
@@ -908,7 +948,7 @@ def hash_server_token(token):
 
 
 def load_servers(base):
-    raw = load_json(paths(base)["servers"], {})
+    raw = load_json_strict(paths(base)["servers"], {})
     out = {}
     for sid, v in raw.items():
         if not isinstance(v, dict):
@@ -1706,7 +1746,33 @@ def server_bundle(base, sid):
 
 # ---------------------------------------------------------------- 流量记账
 
-def add_traffic(base, sid, stats, report_id=""):
+def _load_traffic_for_update(base):
+    P = paths(base)
+    t = load_json_strict(P["traffic"], {})
+    t.setdefault("users", {})
+    t.setdefault("servers", {})
+    t.setdefault("offsets", {})
+    return t
+
+
+def _roll_traffic_periods(t, users, now):
+    """在已持有 traffic 锁时滚动月重置 offset。必须先于新增量累加执行。"""
+    changed = False
+    for name, u in users.items():
+        rd = int(u.get("reset_day") or 0)
+        if not rd or rd < 1 or rd > 31:
+            continue
+        ps = period_start(rd, now)
+        off = t["offsets"].get(name)
+        if not off or off.get("since", 0) < ps:
+            tot = t["users"].get(name, {})
+            t["offsets"][name] = {"up": tot.get("up", 0),
+                                  "down": tot.get("down", 0), "since": now}
+            changed = True
+    return changed
+
+
+def add_traffic(base, sid, stats, report_id="", now=None):
     """累加节点流量增量; report_id 用于响应丢失后的安全重试去重。
     返回 True=本次已记账, False=重复报告已忽略。带文件锁保证并发安全"""
     import fcntl
@@ -1715,12 +1781,12 @@ def add_traffic(base, sid, stats, report_id=""):
     with open(P["traffic"] + ".lock", "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            t = load_json(P["traffic"], {})
-            t.setdefault("users", {})
-            t.setdefault("servers", {})
+            t = _load_traffic_for_update(base)
             sv = t["servers"].setdefault(sid, {"up": 0, "down": 0, "users": {}})
             if report_id and sv.get("last_report_id") == report_id:
                 return False
+            # 月重置先滚动 offset, 再累加本笔; 否则边界后的第一笔会被新 offset 吃掉。
+            changed = _roll_traffic_periods(t, load_users(base), now or time.time())
             for name, pair in stats.items():
                 try:
                     up, down = int(pair[0]), int(pair[1])
@@ -1736,9 +1802,12 @@ def add_traffic(base, sid, stats, report_id=""):
                 su = sv["users"].setdefault(name, {"up": 0, "down": 0})
                 su["up"] += up
                 su["down"] += down
+                changed = True
             if report_id:
                 sv["last_report_id"] = report_id
-            save_json(P["traffic"], t)
+                changed = True
+            if changed:
+                save_json(P["traffic"], t)
             return True
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
@@ -1805,18 +1874,9 @@ def sync_user_states(base, users_lock=None):
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             users = load_users(base)
-            t = load_traffic(base)
-            t_changed = False
+            t = _load_traffic_for_update(base)
+            t_changed = _roll_traffic_periods(t, users, now)
             for name, u in users.items():
-                rd = int(u.get("reset_day") or 0)
-                if rd and 1 <= rd <= 31:
-                    ps = period_start(rd, now)
-                    off = t["offsets"].get(name)
-                    if not off or off.get("since", 0) < ps:
-                        tot = t["users"].get(name, {})
-                        t["offsets"][name] = {"up": tot.get("up", 0),
-                                              "down": tot.get("down", 0), "since": now}
-                        t_changed = True
                 if not u.get("enable", True):
                     continue
                 exp = u.get("expire_at") or 0
@@ -1855,7 +1915,7 @@ def reset_user_usage(base, name):
     with open(P["traffic"] + ".lock", "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            t = load_traffic(base)
+            t = _load_traffic_for_update(base)
             tot = t["users"].get(name, {})
             t["offsets"][name] = {"up": tot.get("up", 0), "down": tot.get("down", 0),
                                   "since": int(time.time())}

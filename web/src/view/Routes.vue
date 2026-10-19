@@ -17,8 +17,8 @@
           </Badge>
           <Badge v-if="!data.final" color="dim">继承设置</Badge>
         </div>
-        <div class="row" style="margin-top: 12px">
-          <Select v-model="finalPick" :options="outboundOptions" style="flex: 1" />
+        <div class="toolbar" style="margin-top: 12px">
+          <Select v-model="finalPick" :options="outboundOptions" class="field" />
           <Button small variant="primary" :loading="finalSaving" @click="saveFinal()">保存</Button>
           <Button v-if="data.final" small :loading="finalSaving" @click="clearFinal()">恢复默认</Button>
         </div>
@@ -34,9 +34,9 @@
           <div class="spacer"></div>
           <Button small variant="danger" @click="delUserFinal(u)">删除</Button>
         </div>
-        <div class="row" style="margin-top: 12px">
-          <Select v-model="ufUser" :options="availableUsers" style="flex: 1" />
-          <Select v-model="ufOutbound" :options="outboundOptions" style="flex: 1" />
+        <div class="toolbar" style="margin-top: 12px">
+          <Select v-model="ufUser" :options="availableUsers" class="field" />
+          <Select v-model="ufOutbound" :options="outboundOptions" class="field" />
           <Button small variant="primary" :loading="finalSaving" @click="addUserFinal">添加</Button>
         </div>
       </div>
@@ -459,6 +459,10 @@ onMounted(async () => {
   grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.grid2 > .card {
+  margin-top: 0;
 }
 
 .uf-row {

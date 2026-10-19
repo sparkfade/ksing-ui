@@ -31,7 +31,7 @@
             <tr v-for="s in servers" :key="s.sid">
               <td>
                 <Badge>{{ s.name }}</Badge>
-                <div class="mono faint sid">{{ s.sid }}</div>
+                <div class="mono faint meta-line">{{ s.sid }}</div>
               </td>
               <td>
                 <template v-if="s.ip_status">
@@ -59,16 +59,16 @@
                 <Badge :color="certModeColor(s.cert_mode)">{{ certModeLabel(s.cert_mode) }}</Badge>
                 <div class="cert-exp" :class="certExpCls(s)" :title="s.cert_issuer ? `签发者: ${s.cert_issuer}` : ''">{{ certExpText(s) }}</div>
               </td>
-              <td>
-                <div class="row" style="gap: 6px">
+              <td class="status-cell">
+                <div class="row tight">
                   <Badge :color="s.online ? 'green' : 'dim'">
-                    <span class="dot" :class="{ on: s.online }"></span>{{ s.online ? '在线' : '离线' }}
+                    <span class="dot" :class="{ on: s.online }" aria-hidden="true"></span>{{ s.online ? '在线' : '离线' }}
                   </Badge>
                   <Badge v-if="s.sb_running === true" color="cyan">核心运行中</Badge>
                   <Badge v-else-if="s.sb_running === false" color="red">核心停止</Badge>
                   <Badge :color="s.synced ? 'green' : 'yellow'">{{ s.synced ? '已同步' : '待同步' }}</Badge>
                 </div>
-                <div class="mono faint" style="font-size: 11.5px; margin-top: 3px">
+                <div class="mono faint meta-line">
                   {{ fmtAgo(s.last_seen) }}<template v-if="s.agent_version"> · v{{ s.agent_version }}</template>
                 </div>
                 <div v-if="s.last_error" class="last-err" :title="s.last_error">⚠ {{ truncate(s.last_error, 40) }}</div>
@@ -81,7 +81,7 @@
               <td class="mono">↑{{ fmtBytes(s.traffic?.up) }} ↓{{ fmtBytes(s.traffic?.down) }}</td>
               <td><Toggle :model-value="s.enabled" @update:model-value="toggleEnable(s, $event)" /></td>
               <td>
-                <div class="row" style="gap: 6px">
+                <div class="row tight">
                   <Button small @click="openEdit(s)">编辑</Button>
                   <Button small @click="openRoute(s)">分流</Button>
                   <Button v-if="s.dns_managed" small title="立即向 Cloudflare 同步该节点的 DNS 记录" @click="dnsSync(s)">同步DNS</Button>
@@ -106,7 +106,7 @@
         <template v-if="form.cert_mode === 'acme'">
           <Input
             v-model="form.domain"
-            :label="form.ip_mode === 'ipv6' ? '绑定域名 (IPv6)' : '绑定域名'"
+            :label="form.ip_mode === 'ipv6' ? '绑定域名（IPv6）' : '绑定域名'"
             :hint="form.ip_mode === 'dual'
               ? '只需填这一个域名；检测到节点有 IPv6 时，自动使用 ' + (derivedDomain6 || '首段加 -v6 的域名') + ' 作为 IPv6 域名'
               : '需解析到该节点，并放行 80 端口用于验证'"
@@ -116,7 +116,7 @@
             v-if="editing && form.ip_mode === 'dual'"
             v-model="form.domain6"
             label="IPv6 域名"
-            hint="留空则跟随绑定域名自动派生 (首段加 -v6)"
+            hint="留空则跟随绑定域名自动派生（首段加 -v6）"
             :placeholder="derivedDomain6 || 'node1-v6.example.com'"
           />
           <Input v-model="form.acme_email" label="ACME 邮箱" hint="可选" placeholder="admin@example.com" />
@@ -130,7 +130,7 @@
           </div>
         </template>
         <p v-else-if="form.cert_mode === 'selfip'" class="muted cert-tip">
-          按节点 IP 签发自签证书，客户端需允许不安全连接 (allowInsecure)。
+          按节点 IP 签发自签证书，客户端需允许不安全连接（allowInsecure）。
         </p>
         <div v-else class="cert-tip">
           <Toggle v-model="form.unsafe_ok" label="我了解不安全模式的风险" />
@@ -217,9 +217,9 @@ import { fmtAgo, fmtBytes, fmtTime } from '@/util/format'
 import type { ServerConfigPreview, ServerCreated, ServerItem, UserInfo } from '@/types'
 
 const CERT_MODES = [
-  { label: '域名证书 (自动申请续签)', value: 'acme' },
+  { label: '域名证书（自动申请续签）', value: 'acme' },
   { label: 'IP 自签证书', value: 'selfip' },
-  { label: '不安全模式 (自签)', value: 'unsafe' },
+  { label: '不安全模式（自签）', value: 'unsafe' },
 ]
 
 const IP_MODES = [
@@ -306,7 +306,7 @@ function certExpText(s: ServerItem): string {
   const now = Date.now() / 1000
   if (s.cert_not_after <= now) return '已过期'
   const days = Math.floor((s.cert_not_after - now) / 86400)
-  if (days < 10) return days < 1 ? '即将过期' : `${days} 天后过期`
+  if (days < 10) return days < 1 ? '即将过期' : `剩余 ${days} 天`
   return fmtTime(s.cert_not_after).slice(0, 10)
 }
 
@@ -584,16 +584,15 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <style scoped>
-.sid {
-  font-size: 11.5px;
-  margin-top: 3px;
-}
-
 .addr-fam {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12.5px;
+}
+
+.status-cell {
+  min-width: 190px;
 }
 
 .addr-fam + .addr-fam {

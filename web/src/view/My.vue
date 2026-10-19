@@ -78,7 +78,7 @@
         <template v-if="links.length">
           <div v-for="(link, i) in links" :key="i" class="link-item">
             <p class="link-name">
-              <span class="dot" :class="{ on: me.enable && me.active !== false }"></span>
+              <span class="dot" :class="{ on: me.enable && me.active !== false }" aria-hidden="true"></span>
               {{ linkName(link, i) }}
             </p>
             <CodeBox :text="link" />
@@ -261,6 +261,7 @@ onMounted(load)
   display: flex;
   align-items: baseline;
   gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 8px;
 }
 

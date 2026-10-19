@@ -111,6 +111,7 @@ export interface ServerConfigPreview {
 export interface RateStat {
   rate_up: number
   rate_down: number
+  sampled_at?: number
 }
 
 export interface TrafficData {

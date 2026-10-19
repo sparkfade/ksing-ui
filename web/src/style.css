@@ -229,8 +229,44 @@ a {
   flex-wrap: wrap;
 }
 
+.row.tight {
+  gap: 6px;
+}
+
 .spacer {
   flex: 1;
+}
+
+.cell-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cell-title {
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta-line {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbar .field {
+  flex: 1 1 180px;
+  min-width: 0;
 }
 
 /* ── 表格 ────────────────────────────────── */
@@ -278,6 +314,18 @@ table.tbl {
 .tbl td .row {
   flex-wrap: wrap;
   row-gap: 6px;
+}
+
+.tbl td.wrap-cell {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tbl td.ellipsis-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── 信息行 ──────────────────────────────── */

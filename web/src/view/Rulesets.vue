@@ -120,7 +120,7 @@ async function buildIndex() {
   building.value = true
   try {
     const r = await post<{ total: number }>('/api/rulesets/index', {})
-    toast(`规则集清单已刷新, 共 ${r.total} 个`, 'success')
+    toast(`规则集清单已刷新，共 ${r.total} 个`, 'success')
     search()
   } catch (e) {
     toast((e as Error).message, 'error')

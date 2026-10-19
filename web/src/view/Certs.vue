@@ -5,7 +5,7 @@
       <div class="spacer"></div>
       <Button small @click="load" :loading="loading">刷新</Button>
     </div>
-    <p class="page-sub">证书由节点上的 sing-box 自动申请与续签 (Let's Encrypt ACME)；域名证书需在添加节点时绑定域名。</p>
+    <p class="page-sub">证书由节点上的 sing-box 自动申请与续签（Let's Encrypt ACME）；域名证书需在添加节点时绑定域名。</p>
 
     <div class="card">
       <Spinner v-if="loading && !certs.length" />
@@ -25,17 +25,19 @@
           <tbody>
             <tr v-for="c in certs" :key="c.sid">
               <td>
-                <span class="dot" :class="{ on: c.online }"></span>
-                <span style="font-weight: 600">{{ c.name }}</span>
-                <div class="mono faint sid">{{ c.sid }}</div>
+                <div class="cell-title-row" :aria-label="`${c.name} ${c.online ? '在线' : '离线'}`">
+                  <span class="dot" :class="{ on: c.online }" aria-hidden="true"></span>
+                  <span class="cell-title">{{ c.name }}</span>
+                </div>
+                <div class="mono faint meta-line">{{ c.sid }}</div>
               </td>
-              <td>
-                <div class="cert-fam">
-                  <span class="mono">{{ c.domain || (c.cert_mode === 'acme' ? '未配置 IPv4 域名' : 'IP 模式') }}</span>
+              <td class="cert-domain-cell">
+                <div class="cert-fam" :title="c.domain || undefined">
+                  <span class="mono cert-domain">{{ c.domain || (c.cert_mode === 'acme' ? '未配置 IPv4 域名' : 'IP 模式') }}</span>
                   <span v-if="c.cert_mode === 'acme' && c.ip_status?.ipv4.enabled" class="rr" :class="rrCls(c.ip_status.ipv4)" :title="c.ip_status.ipv4.active ? 'A 记录正常' : c.ip_status.ipv4.error || '等待检测'">A</span>
                 </div>
-                <div v-if="c.domain6 || c.ip_status?.ipv6.enabled" class="cert-fam">
-                  <span class="mono">{{ c.domain6 || '未配置 IPv6 域名' }}</span>
+                <div v-if="c.domain6 || c.ip_status?.ipv6.enabled" class="cert-fam" :title="c.domain6 || undefined">
+                  <span class="mono cert-domain">{{ c.domain6 || '未配置 IPv6 域名' }}</span>
                   <span
                     v-if="c.cert_mode === 'acme' && c.ip_status?.ipv6.enabled"
                     class="rr"
@@ -45,7 +47,7 @@
                 </div>
               </td>
               <td><Badge :color="modeColor(c.cert_mode)">{{ modeLabel(c.cert_mode) }}</Badge></td>
-              <td class="muted">{{ c.issuer || '-' }}</td>
+              <td class="muted issuer-cell" :title="c.issuer || undefined">{{ c.issuer || '-' }}</td>
               <td class="mono">{{ c.not_after ? fmtTime(c.not_after) : '-' }}</td>
               <td><Badge :color="statusColor(c.status)">{{ statusText(c) }}</Badge></td>
             </tr>
@@ -84,9 +86,9 @@ function statusColor(s: CertItem['status']): 'green' | 'yellow' | 'red' | 'dim' 
 }
 
 function statusText(c: CertItem): string {
-  if (c.status === 'pending') return '申请中/未上报'
+  if (c.status === 'pending') return '申请中 / 未上报'
   if (c.status === 'expired') return '已过期'
-  return `剩 ${Math.round(c.days_left ?? 0)} 天`
+  return `剩余 ${Math.round(c.days_left ?? 0)} 天`
 }
 
 function rrCls(f: FamilyStatus): string {
@@ -115,18 +117,34 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <style scoped>
-.sid {
-  font-size: 11.5px;
-  margin-top: 3px;
-}
-
 .cert-fam {
   display: flex;
   align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
 
 .cert-fam + .cert-fam {
-  margin-top: 3px;
+  margin-top: 4px;
+}
+
+.cert-domain {
+  min-width: 0;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cert-domain-cell {
+  max-width: 330px;
+}
+
+.issuer-cell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rr {
@@ -134,8 +152,8 @@ onUnmounted(() => clearInterval(timer))
   font-weight: 700;
   padding: 0 5px;
   border-radius: 4px;
-  margin-left: 6px;
   line-height: 1.7;
+  flex-shrink: 0;
 }
 
 .rr.ok {
@@ -147,5 +165,11 @@ onUnmounted(() => clearInterval(timer))
   background: var(--c-yellow-soft);
   color: var(--c-yellow);
   cursor: help;
+}
+
+@media (max-width: 767px) {
+  .cert-domain {
+    max-width: 210px;
+  }
 }
 </style>

@@ -330,10 +330,17 @@ onMounted(load)
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   padding: 8px 12px;
   cursor: pointer;
   font-size: 12.5px;
   transition: background-color 0.12s var(--ease);
+}
+
+.rs-item > .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rs-item:hover {

@@ -11,7 +11,7 @@ ksing-ui 节点 agent (纯 Python 标准库, 无需第三方依赖)
 配置: agent.json (install.sh 生成)
   {"panel": "https://1.2.3.4:9443", "sid": "...", "token": "...",
    "ca": "<面板CA路径>", "dir": "/etc/ksing", "bin": "/usr/local/bin/sing-box",
-   "stats": "127.0.0.1:18899", "pull_interval": 30, "push_interval": 30}
+   "stats": "127.0.0.1:18899", "pull_interval": 30, "push_interval": 10}
 """
 
 import hashlib
@@ -25,6 +25,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -38,7 +39,7 @@ for _f in (sys.stdout, sys.stderr):
     except Exception:  # noqa: BLE001
         pass
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.json")
 if not os.path.exists(CFG_PATH):
@@ -64,6 +65,7 @@ BASELINE_PATH = os.path.join(DIR, "agent-baseline.json")  # 面板已确认的 c
 RULESET_DIR = os.path.join(DIR, "rulesets")
 HEALTH = {"ok_at": time.time()}  # 看门狗: 面板通信连续失败则退出让 systemd 重启
 LAST_ERROR = [""]  # 最近一次错误, 随上报带给面板 (列表包一层便于跨线程改写)
+REPORT_LOCK = threading.RLock()  # report 与重启前结算串行化, 防 pending 文件竞态
 
 
 def log(msg):
@@ -313,66 +315,155 @@ def load_state():
         return {}
 
 
+def _atomic_json(path, obj, mode=0o600):
+    """持久化 JSON: 临时文件落盘 + fsync, 再原子替换并同步目录。"""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp", dir=d)
+    replaced = False
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            json.dump(obj, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        replaced = True
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not replaced:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    try:
+        dfd = os.open(d, os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except (OSError, AttributeError):
+        pass
+
+
 def save_state(state):
-    tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    os.replace(tmp, STATE_PATH)
+    _atomic_json(STATE_PATH, state)
 
 
 def load_pending():
     try:
         with open(PENDING_PATH, "r", encoding="utf-8") as f:
             p = json.load(f)
-        if isinstance(p.get("id"), str) and isinstance(p.get("stats"), dict):
+        if isinstance(p.get("id"), str) and p["id"] and \
+                isinstance(p.get("stats"), dict) and p["stats"]:
             return p
-    except (OSError, ValueError):
-        pass
-    return None
+        return None
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise RuntimeError("pending 文件损坏或不可读: %s" % e) from e
 
 
 def save_pending(p):
-    tmp = PENDING_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(p, f)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, PENDING_PATH)
+    _atomic_json(PENDING_PATH, p)
 
 
 def clear_pending():
+    """清除已确认 pending; 删除失败时写入忽略标记, 避免永久重试旧报告。"""
     try:
         os.remove(PENDING_PATH)
+        return True
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        try:
+            save_pending({"id": "", "stats": {}, "target": None})
+            return True
+        except OSError:
+            return False
 
 
 def load_baseline():
     try:
         with open(BASELINE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
+        if not isinstance(data, dict):
+            return None
+        if isinstance(data.get("counters"), dict):
+            return {"epoch": str(data.get("epoch") or ""), "counters": data["counters"]}
+        # 兼容旧版纯计数器基线
+        return {"epoch": "", "counters": data}
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as e:
+        raise RuntimeError("baseline 文件损坏或不可读: %s" % e) from e
 
 
-def save_baseline(counters):
-    tmp = BASELINE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(counters, f)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, BASELINE_PATH)
+def save_baseline(counters, epoch=""):
+    _atomic_json(BASELINE_PATH, {"epoch": epoch or "", "counters": counters})
 
 
-def traffic_delta(baseline, current):
-    """累计值差分; core 重启导致计数器回退时, 从回退后的当前值重新计起"""
+def traffic_delta(baseline, current, epoch_changed=False):
+    """累计值差分。
+
+    core 重启后计数器从零开始；若新核心在下次查询前已超过旧基线，单纯比较
+    数值大小会少计。调用方通过进程启动代际显式告知重启，此时当前值全部计入。
+    """
     delta = {}
     for name, pair in current.items():
+        if epoch_changed:
+            up, down = pair[0], pair[1]
+            if up > 0 or down > 0:
+                delta[name] = [up, down]
+            continue
         old = baseline.get(name, [0, 0])
         up = pair[0] if pair[0] < old[0] else pair[0] - old[0]
         down = pair[1] if pair[1] < old[1] else pair[1] - old[1]
         if up > 0 or down > 0:
             delta[name] = [up, down]
     return delta
+
+
+def singbox_process_epoch():
+    """当前 sing-box 进程代际: boot_id + /proc 启动时间。
+
+    用于识别计数器是否已随核心重启归零。取不到时返回空串，退回旧的数值比较。
+    """
+    pid = 0
+    if have_systemd_unit():
+        try:
+            r = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", svc_name()],
+                               capture_output=True, text=True, timeout=5)
+            pid = int((r.stdout or "").strip() or 0)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pid = 0
+    if not pid:
+        try:
+            with open(os.path.join(DIR, "sing-box.pid"), "r", encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            return ""
+    try:
+        os.kill(pid, 0)
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            cmdline = f.read()
+        if b"sing-box" not in cmdline and b"k-sing" not in cmdline:
+            return ""
+        with open("/proc/sys/kernel/random/boot_id", "r", encoding="ascii") as f:
+            boot_id = f.read().strip()
+        with open("/proc/%d/stat" % pid, "r", encoding="ascii") as f:
+            stat = f.read()
+        rest = stat.rsplit(")", 1)[1].split()
+        started = rest[19]  # /proc/<pid>/stat 第 22 字段 starttime
+        return "%s:%s" % (boot_id, started)
+    except (OSError, ValueError, IndexError):
+        return ""
 
 
 def sync_rulesets(metas):
@@ -627,6 +718,18 @@ def pull_config(state, wait=0):
         os.remove(tmp)
         log("配置校验失败, 保留旧配置: %s" % (r.stdout + r.stderr).strip()[-500:])
         return None  # 应用失败 (区别于未变更), 调用方需退避
+    # 计划内重启会清空 sing-box 累计计数器；先查询并上报未结算增量，
+    # 否则上次 push 到本次配置切换之间的流量会永久丢失。
+    if not flush_traffic_before_restart(state):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        if singbox_running():
+            LAST_ERROR[0] = "核心仍在运行但无法读取流量统计，暂缓应用新配置以保护流量"
+            log("重启前无法取得流量快照，暂缓应用配置")
+            return None
+        log("核心未运行，无未结算计数器，继续应用配置")
     os.replace(tmp, cfg_path)
     restart_singbox()
     state["hash"] = resp["hash"]
@@ -692,42 +795,115 @@ def cert_info():
     return best
 
 
+def flush_traffic_before_restart(state):
+    """配置切换前把未结算增量持久化为 pending，避免核心重启丢计。
+
+    若已有 pending，先尝试向面板确认它；确认后才抓取下一段增量，避免两个批次
+    混在一起导致重试双计。最终快照只写本地文件，不等待 HTTP 回包，因此从查询
+    到停止核心之间的丢计窗口尽量小。
+    """
+    with REPORT_LOCK:
+        if load_pending():
+            try:
+                _report(state)  # 仅重试已有 pending；不在这里生成新批次
+            except Exception as e:  # noqa: BLE001
+                log("重启前确认旧 pending 失败(已保留): %s" % e)
+                return False
+            if load_pending():
+                log("旧 pending 尚未确认，暂不生成新快照")
+                return False
+        try:
+            current, epoch = _sample_traffic(required=True)
+            snapshot = _build_traffic_snapshot(current, epoch)
+            if snapshot:
+                save_pending(snapshot)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log("重启前流量快照失败: %s" % e)
+            return False
+
+
 def report(state):
+    with REPORT_LOCK:
+        return _report(state, require_snapshot=False)
+
+
+def _query_traffic_retry(required=False):
+    last_error = None
+    for attempt in (0, 1):
+        try:
+            return query_traffic()
+        except OSError as e:
+            # sing-box 刚重启时统计端口尚未就绪, 等 3 秒重试一次
+            last_error = e
+            if attempt == 0:
+                time.sleep(3)
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            break
+    if required:
+        raise RuntimeError("无法读取核心流量计数器: %s" % last_error)
+    log("流量查询失败(sing-box 可能未运行): %s" % last_error)
+    return None
+
+
+def _sample_traffic(required=False):
+    """读取计数器并返回与其对应的核心代际；采样期间核心重启则重试一次。"""
+    current = None
+    epoch = ""
+    for _ in (0, 1):
+        epoch_before = singbox_process_epoch()
+        current = _query_traffic_retry(required=required)
+        if current is None:
+            return None, ""
+        epoch_after = singbox_process_epoch()
+        if not epoch_before or not epoch_after or epoch_before == epoch_after:
+            return current, epoch_after or epoch_before
+        epoch = epoch_after
+    if required:
+        raise RuntimeError("采样期间 sing-box 进程发生重启")
+    return current, ""
+
+
+def _build_traffic_snapshot(current, epoch):
+    baseline = load_baseline()
+    if baseline is None:
+        # 升级/首次运行只建立基线, 避免把旧 reset 模式已报过的累计值重复记账
+        save_baseline(current, epoch)
+        return None
+    epoch_changed = bool(baseline["epoch"] and epoch and baseline["epoch"] != epoch)
+    stats = traffic_delta(baseline["counters"], current, epoch_changed)
+    if stats:
+        return {
+            "id": secrets.token_hex(16),
+            "stats": stats,
+            "target": current,
+            "epoch": epoch or baseline["epoch"],
+        }
+    if current != baseline["counters"] or (epoch and baseline["epoch"] != epoch):
+        save_baseline(current, epoch or baseline["epoch"])
+    return None
+
+
+def _report(state, require_snapshot=False):
     pending = load_pending()
     report_id = pending["id"] if pending else ""
     target = pending.get("target") if pending else None
+    target_epoch = pending.get("epoch", "") if pending else ""
     if pending:
         # 上轮未获确认: 重试同一 ID/增量; core 新流量仍累计, 不会丢失。
         stats = pending["stats"]
     else:
         stats = {}
-        current = None
-        for attempt in (0, 1):
-            try:
-                current = query_traffic()
-                break
-            except OSError as e:
-                # sing-box 刚重启时统计端口尚未就绪, 等 3 秒重试一次
-                if attempt == 0:
-                    time.sleep(3)
-                else:
-                    log("流量查询失败(sing-box 可能未运行): %s" % e)
-            except Exception as e:  # noqa: BLE001
-                log("流量查询失败(sing-box 可能未运行): %s" % e)
-                break
+        current, epoch = _sample_traffic(required=require_snapshot)
         if current is not None:
-            baseline = load_baseline()
-            if baseline is None:
-                # 升级/首次运行只建立基线, 避免把旧 reset 模式已报过的累计值重复记账
-                save_baseline(current)
-            else:
-                stats = traffic_delta(baseline, current)
-                if stats:
-                    report_id = secrets.token_hex(16)
-                    target = current
-                    save_pending({"id": report_id, "stats": stats, "target": target})
-                elif current != baseline:
-                    save_baseline(current)  # core 重启/用户移除后的零增量基线推进
+            snapshot = _build_traffic_snapshot(current, epoch)
+            if snapshot:
+                report_id = snapshot["id"]
+                stats = snapshot["stats"]
+                target = snapshot["target"]
+                target_epoch = snapshot["epoch"]
+                save_pending(snapshot)
     body = {
         "stats": stats,
         "applied_hash": state.get("hash", ""),
@@ -748,17 +924,23 @@ def report(state):
     resp = api_json("POST", "/agent/report", body)
     if report_id and not resp.get("accounted", True):
         raise RuntimeError("面板暂未确认流量记账, 下轮将按原报告 ID 重试")
+    LAST_ERROR[0] = ""
     if report_id:
         if isinstance(target, dict):
-            save_baseline(target)
+            save_baseline(target, target_epoch)
         else:
             # 兼容旧版 pending(无 target): 确认后以当前累计值建基线, 避免下轮双计
             try:
-                save_baseline(query_traffic())
-            except Exception:  # noqa: BLE001
-                pass
-        clear_pending()
-    LAST_ERROR[0] = ""
+                current, epoch = _sample_traffic(required=True)
+                save_baseline(current, epoch)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError("旧格式 pending 已确认，但无法建立新基线: %s" % e) from e
+        if not clear_pending():
+            LAST_ERROR[0] = "流量已确认但 pending 清理失败，请检查节点数据目录权限"
+            log(LAST_ERROR[0])
+    ignored = resp.get("ignored_users")
+    if isinstance(ignored, list) and ignored:
+        log("面板忽略未授权用户流量: %s" % ",".join(str(x) for x in ignored[:20]))
     if stats:
         total = sum(p[0] + p[1] for p in stats.values())
         log("已上报流量: %d 用户, 合计 %d 字节" % (len(stats), total))

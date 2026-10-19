@@ -30,7 +30,7 @@
 
       <div class="foot">
         <div class="srv-state" :title="srvTotal ? `${srvOnline}/${srvTotal} 节点在线` : '暂无服务器节点'">
-          <span class="dot" :class="{ on: srvOnline > 0 }"></span>
+          <span class="dot" :class="{ on: srvOnline > 0 }" aria-hidden="true"></span>
           <span class="muted">{{ srvTotal ? `节点 ${srvOnline}/${srvTotal} 在线` : '暂无服务器节点' }}</span>
         </div>
         <div class="me">
