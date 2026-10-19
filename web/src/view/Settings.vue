@@ -56,7 +56,13 @@
             label="API Token"
             type="password"
             :placeholder="cfTokenSet ? '已配置 · 输入以更换' : '未配置'"
-            hint="需 Zone.DNS Edit 权限；只保存在中控，节点只上报 IP，记录由中控创建"
+            hint="需 Zone.DNS Edit 权限；支持用户 Token 与账号级 Token (cfat_)；只保存在中控，节点只上报 IP"
+          />
+          <Input
+            v-model="form.cf_account_id"
+            label="Account ID (可选)"
+            hint="账号级 Token (cfat_) 校验用；普通用户 Token 可留空"
+            placeholder="32 位十六进制"
           />
           <Input
             v-model="form.cf_zone_id"
@@ -121,6 +127,7 @@ const form = reactive({
   sub_host: '',
   sub_path: 'sub',
   sub_port: 0,
+  cf_account_id: '',
   cf_zone_id: '',
 })
 const cfToken = ref('')
@@ -159,6 +166,7 @@ async function load() {
       sub_host: subHost,
       sub_path: s.sub_path || 'sub',
       sub_port: s.sub_port ?? 0,
+      cf_account_id: s.cf_account_id || '',
       cf_zone_id: s.cf_zone_id || '',
     })
     cfTokenSet.value = !!s.cf_token_set
@@ -201,11 +209,19 @@ async function save() {
 async function testCfToken() {
   cfTesting.value = true
   try {
-    const r = await post<{ ok: boolean; error?: string }>('/api/settings/cf_test', {
+    const r = await post<{ ok: boolean; error?: string; zones?: number | null }>('/api/settings/cf_test', {
       token: cfToken.value.trim() || undefined,
+      account_id: form.cf_account_id.trim() || undefined,
     })
-    if (r.ok) toast('Token 有效', 'success')
-    else toast(`Token 无效: ${r.error || ''}`, 'error')
+    if (!r.ok) {
+      toast(`Token 无效: ${r.error || ''}`, 'error')
+    } else if (typeof r.zones === 'number' && r.zones > 0) {
+      toast(`Token 有效，可管理 ${r.zones} 个域名`, 'success')
+    } else if (r.zones === 0) {
+      toast('Token 有效，但读不到域名列表：请确认已授予 Zone 读取权限，或直接指定 Zone ID', 'info')
+    } else {
+      toast('Token 有效', 'success')
+    }
   } catch (e) {
     toast((e as Error).message, 'error')
   } finally {

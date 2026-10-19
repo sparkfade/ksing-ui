@@ -1332,7 +1332,7 @@ SETTINGS_EDITABLE = ("final", "host", "sni",
                      "private_action", "auto_detect_interface", "log_level",
                      "panel_listen", "panel_port",
                      "sub_host", "sub_port", "sub_path",
-                     "cf_api_token", "cf_zone_id")
+                     "cf_api_token", "cf_account_id", "cf_zone_id")
 
 def h_settings_get(ctx):
     s = sbtool.get_settings(BASE)
@@ -1348,6 +1348,7 @@ def h_settings_put(ctx):
         s = sbtool.get_settings(BASE)
         raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
         old_cf_token = raw.get("cf_api_token") or ""
+        old_cf_account = raw.get("cf_account_id") or ""
         for k in SETTINGS_EDITABLE:
             if k in b:
                 v = b[k]
@@ -1385,29 +1386,38 @@ def h_settings_put(ctx):
                     v = str(v).strip()
                     if v and not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", v):
                         raise ApiError("Cloudflare API Token 格式非法")
+                if k == "cf_account_id":
+                    v = str(v).strip().lower()
+                    if v and not re.fullmatch(r"[0-9a-f]{32}", v):
+                        raise ApiError("Cloudflare Account ID 应为 32 位十六进制")
                 if k == "cf_zone_id":
                     v = str(v).strip().lower()
                     if v and not re.fullmatch(r"[0-9a-f]{32}", v):
                         raise ApiError("Cloudflare Zone ID 应为 32 位十六进制")
                 raw[k] = v
                 s[k] = v
-        if (raw.get("cf_api_token") or "") != old_cf_token:
+        if (raw.get("cf_api_token") or "") != old_cf_token \
+                or (raw.get("cf_account_id") or "") != old_cf_account:
             sbtool._CF_ZONE_CACHE.clear()  # 换账号后 zone 归属可能完全不同
         sbtool.save_json(sbtool.paths(BASE)["settings"], raw)
     return 200, {"ok": True}
 
 
 def h_settings_cf_test(ctx):
-    """校验 Cloudflare Token: 优先测用户刚输入的, 否则测已保存的"""
+    """校验 Cloudflare Token: 优先测用户刚输入的, 否则测已保存的; 返回可见 zone 数"""
+    saved = sbtool.get_settings(BASE)
     token = str(ctx.body.get("token") or "").strip()
     if not token:
-        token = sbtool.get_settings(BASE).get("cf_api_token") or ""
+        token = saved.get("cf_api_token") or ""
     if not token:
         raise ApiError("未配置 Cloudflare API Token")
-    ok, err = sbtool.cf_verify_token(token)
+    account_id = str(ctx.body.get("account_id") or saved.get("cf_account_id") or "").strip().lower()
+    if account_id and not re.fullmatch(r"[0-9a-f]{32}", account_id):
+        raise ApiError("Cloudflare Account ID 应为 32 位十六进制")
+    ok, err, zones = sbtool.cf_verify_token(token, account_id)
     if not ok:
         return 200, {"ok": False, "error": err}
-    return 200, {"ok": True}
+    return 200, {"ok": True, "zones": zones}
 
 
 def h_settings_admin(ctx):

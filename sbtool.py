@@ -197,6 +197,7 @@ DEFAULT_SETTINGS = {
     "sub_path": "sub",         # 订阅路径 (如 sub → /sub/<token>; 改后旧订阅地址失效)
     # ---- Cloudflare DNS 自动管理 (只存中控, 节点不接触) ----
     "cf_api_token": "",        # CF API Token (需 Zone.DNS Edit 权限); 接口只写不回显
+    "cf_account_id": "",       # 可选: 账号级 Token (cfat_) 的 Account ID, 用于 tokens/verify
     "cf_zone_id": "",          # 可选: 单 zone 场景直接指定, 留空按域名逐级自动定位
 }
 
@@ -1113,8 +1114,8 @@ def node_dns_plan(srv):
     return out
 
 
-def cf_request(method, path, token, payload=None, timeout=20):
-    """Cloudflare API 调用; 成功返回 result, 失败抛 RuntimeError"""
+def cf_request(method, path, token, payload=None, timeout=20, full=False):
+    """Cloudflare API 调用; 成功返回 result (full=True 时返回完整 body), 失败抛 RuntimeError"""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(CF_API + path, data=data, method=method)
     req.add_header("Authorization", "Bearer " + token)
@@ -1135,16 +1136,45 @@ def cf_request(method, path, token, payload=None, timeout=20):
         errs = body.get("errors") or []
         msg = "; ".join(str(x.get("message", x)) for x in errs[:3] if isinstance(x, dict))
         raise RuntimeError("Cloudflare: %s" % (msg or str(body)[:200]))
-    return body.get("result")
+    return body if full else body.get("result")
 
 
-def cf_verify_token(token):
-    """校验 CF token 有效性; 返回 (ok, 错误消息)"""
+def cf_verify_token(token, account_id=""):
+    """校验 CF token; 返回 (ok, 错误消息, 可见 zone 数或 None)。
+    用户 Token 走 /user/tokens/verify; 账号级 Token (cfat_ 前缀) 走
+    /accounts/{account_id}/tokens/verify。verify 端点不可用时退化为列 zone
+    (两类 Token 都支持), 顺便确认 Zone 读取权限 (DNS 管理需要 Zone.DNS Edit)"""
+    account_id = (account_id or "").strip().lower()
+    verify_paths = []
+    if account_id:
+        verify_paths.append("/accounts/%s/tokens/verify" % account_id)
+    verify_paths.append("/user/tokens/verify")
+    valid = False
+    last_err = ""
+    for path in verify_paths:
+        try:
+            cf_request("GET", path, token, timeout=15)
+            valid = True
+            break
+        except RuntimeError as e:
+            last_err = str(e)
+    # 列 zone: verify 兜底 + 统计可见域名数; 失败时若 verify 已通过,
+    # 说明是 Zone 读取权限不足而非 Token 无效, 返回 zones=0 交由前端提示。
     try:
-        cf_request("GET", "/user/tokens/verify", token, timeout=15)
-        return True, ""
+        body = cf_request("GET", "/zones?per_page=1", token, timeout=15, full=True)
+        info = body.get("result_info") or {}
+        zones = info.get("total_count")
+        if zones is None:
+            zones = len(body.get("result") or [])
+        return True, "", zones
     except RuntimeError as e:
-        return False, str(e)
+        if valid:
+            return True, "", 0
+        if token.startswith("cfat_"):
+            if not account_id:
+                return False, "账号级 Token (cfat_) 需要同时填写 Account ID", None
+            return False, "账号级 Token 校验失败，请确认 Account ID 与 Token 匹配: %s" % e, None
+        return False, str(e) or last_err, None
 
 
 def cf_find_zone(token, domain, zone_id=""):
@@ -1752,13 +1782,18 @@ def cmd_set(args):
     base = data_dir(args)
     P = paths(base)
     s = get_settings(base)
+    if args.cf_account_id is not None:
+        args.cf_account_id = args.cf_account_id.strip().lower()
+        if args.cf_account_id and not re.fullmatch(r"[0-9a-f]{32}", args.cf_account_id):
+            die("Cloudflare Account ID 应为 32 位十六进制")
     changed = False
     for k, v in (("listen", args.listen), ("port", args.port), ("cert", args.cert),
                  ("key", args.key), ("final", args.final), ("host", args.host),
                  ("sni", args.sni), ("panel_listen", args.panel_listen),
                  ("panel_port", args.panel_port), ("admin_user", args.admin_user),
                  ("agent_listen", args.agent_listen), ("agent_port", args.agent_port),
-                 ("cf_api_token", args.cf_api_token), ("cf_zone_id", args.cf_zone_id),
+                 ("cf_api_token", args.cf_api_token), ("cf_account_id", args.cf_account_id),
+                 ("cf_zone_id", args.cf_zone_id),
                  ("private_action", args.private_action), ("log_level", args.log_level)):
         if v is not None:
             s[k] = v
@@ -2239,6 +2274,7 @@ def main():
     p.add_argument("--admin-user", help="面板管理员用户名")
     p.add_argument("--admin-pass", help="面板管理员密码 (设置后用于登录面板)")
     p.add_argument("--cf-api-token", help="Cloudflare API Token (Zone.DNS Edit; 节点 DNS 自动管理)")
+    p.add_argument("--cf-account-id", help="Cloudflare Account ID (账号级 cfat_ Token 校验用, 可选)")
     p.add_argument("--cf-zone-id", help="Cloudflare Zone ID (可选, 留空自动按域名定位)")
     p.set_defaults(fn=cmd_set)
 

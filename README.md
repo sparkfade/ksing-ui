@@ -63,7 +63,7 @@ python3 /opt/ksing-ui/server.py --dir /etc/ksing-ui --listen 0.0.0.0 --port 8080
 面板 → 服务器节点 → 添加节点，只需填 **名称 / 端口 / 绑定域名**:
 
 - **网络模式**：默认双栈（节点安装时自动检测 IPv4/IPv6）；也可选仅 IPv4 或纯 IPv6
-- **Cloudflare 自动 DNS（推荐）**：在 设置 页配置 CF API Token（Zone.DNS Edit）后，节点开启「自动 DNS」即可——节点上报公网 IP，**中控**自动创建记录（Token 不出中控）：
+- **Cloudflare 自动 DNS（推荐）**：在 设置 页配置 CF API Token（Zone.DNS Edit）后，节点开启「自动 DNS」即可——节点上报公网 IP，**中控**自动创建记录（Token 不出中控）。支持普通用户 Token 与账号级 Token（`cfat_`）：账号级 Token 校验时需同时填写可选 Account ID，DNS 记录操作本身不需要 Account ID：
   - 有 IPv4：绑定域名创建 A 记录（如 `hk1.example.com`）
   - 还有 IPv6：自动使用首段加 `-v6` 的独立域名创建 AAAA 记录（`hk1-v6.example.com`）
   - 严禁同一域名同时有 A 和 AAAA；同名冲突记录会被自动纠正

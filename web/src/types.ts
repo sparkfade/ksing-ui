@@ -196,6 +196,7 @@ export interface Settings {
   sub_path: string
   sub_port?: number
   cf_token_set?: boolean
+  cf_account_id?: string
   cf_zone_id?: string
   admin_user: string
 }
