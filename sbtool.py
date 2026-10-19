@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -928,6 +929,8 @@ def load_servers(base):
         srv.setdefault("reported_ip", "")      # 旧字段: 兼容旧 agent, 等价于任一上报地址
         srv.setdefault("reported_ipv4", "")
         srv.setdefault("reported_ipv6", "")
+        srv.setdefault("reported_ipv4_at", 0)  # 最近一次非空上报时间 (空值宽限用)
+        srv.setdefault("reported_ipv6_at", 0)
         legacy = srv.get("reported_ip") or ""
         if legacy and not srv["reported_ipv4"] and not srv["reported_ipv6"]:
             try:
@@ -935,6 +938,12 @@ def load_servers(base):
                 srv["reported_ipv4" if addr.version == 4 else "reported_ipv6"] = legacy
             except ValueError:
                 pass
+        for family in ("ipv4", "ipv6"):
+            key = "reported_" + family
+            at_key = key + "_at"
+            if srv[key] and not srv[at_key]:
+                # 旧数据没有时间戳: 以最近心跳/创建时间作为起点, 避免永久保留
+                srv[at_key] = int(srv.get("last_seen") or srv.get("created_at") or 0)
         srv.setdefault("users", [])
         # users_mode: all=全部 / selected=指定 / none=无用户。
         # 旧数据没有该字段且 users=[] 时语义是全部, 必须保留; 新空列表可表示无用户。
@@ -964,7 +973,7 @@ def save_servers(base, servers):
 def server_addr(srv, family="ipv4"):
     """按协议族取节点订阅地址; acme 用对应域名, 自签模式用 agent 上报 IP"""
     if srv.get("cert_mode") == "acme":
-        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain")
+        domain = effective_family_domain(srv, family)
         if domain:
             return domain
     if family == "ipv6":
@@ -975,7 +984,7 @@ def server_addr(srv, family="ipv4"):
 def server_sni(s, srv, family="ipv4"):
     """节点 SNI: acme 即对应协议族域名; 自签模式用全局伪装 SNI (可为空)"""
     if srv.get("cert_mode") == "acme":
-        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain")
+        domain = effective_family_domain(srv, family)
         if domain:
             return domain
     return s.get("sni") or ""
@@ -986,36 +995,99 @@ def server_insecure(srv):
     return srv.get("cert_mode") != "acme"
 
 
-_DNS_CACHE = {}  # (domain, family) -> (at, [ip...]); 状态页/配置生成共用 60s 缓存
+_DNS_CACHE = {}       # (domain, family) -> (at, [ip...], kind, checked_at)
+_DNS_LAST_GOOD = {}   # (domain, family) -> (at, [ip...]); 解析瞬时失败时短期沿用
+_DNS_CACHE_LOCK = threading.Lock()
+DNS_OK_TTL = 60          # 成功结果缓存
+DNS_NODATA_TTL = 5       # 确定无记录: 短缓存, 避免记录刚创建时长时间误判
+DNS_ERROR_TTL = 3        # 超时/SERVFAIL: 极短缓存, 尽快恢复
+DNS_STALE_TTL = 15       # 沿用 last-known-good 时的重试间隔
+DNS_LAST_GOOD_TTL = 300  # 瞬时失败最多沿用最近成功结果 5 分钟
 
 
-def resolve_domain_ips(domain, family):
-    """解析域名 A/AAAA, 仅返回全球单播地址; 失败/超时按空列表处理"""
+def resolve_domain_status(domain, family):
+    """解析 A/AAAA, 返回 (ips, kind, checked_at)。
+    kind: ok=有记录 / nodata=确定无记录 / error=解析暂不可用 / stale=沿用最近成功结果。
+    瞬时解析失败不能伪装成“缺少记录”, 否则会误停用协议族并导致配置反复下发。"""
     if not domain:
-        return []
+        return [], "nodata", time.time()
     key = (domain, family)
-    hit = _DNS_CACHE.get(key)
     now = time.time()
-    if hit and now - hit[0] < 60:
-        return list(hit[1])
+    with _DNS_CACHE_LOCK:
+        hit = _DNS_CACHE.get(key)
+        if hit:
+            ttl = (DNS_OK_TTL if hit[2] == "ok" else
+                   DNS_STALE_TTL if hit[2] == "stale" else
+                   DNS_NODATA_TTL if hit[2] == "nodata" else DNS_ERROR_TTL)
+            if now - hit[0] < ttl:
+                return list(hit[1]), hit[2], hit[3]
+    ips = []
+    kind = "ok"
     try:
         infos = socket.getaddrinfo(domain, None,
                                    socket.AF_INET if family == "ipv4" else socket.AF_INET6,
                                    socket.SOCK_STREAM)
-        out = []
         for info in infos:
             try:
                 ip = ipaddress.ip_address(info[4][0])
                 if ip.is_global:
                     text = str(ip)
-                    if text not in out:
-                        out.append(text)
+                    if text not in ips:
+                        ips.append(text)
             except ValueError:
                 continue
+        if not ips:
+            kind = "nodata"
     except (OSError, ValueError):
-        out = []
-    _DNS_CACHE[key] = (now, out)
-    return out
+        kind = "error"
+    checked = time.time()
+    with _DNS_CACHE_LOCK:
+        if ips:
+            _DNS_LAST_GOOD[key] = (checked, list(ips))
+        if kind in ("error", "nodata"):
+            good = _DNS_LAST_GOOD.get(key)
+            if good and checked - good[0] < DNS_LAST_GOOD_TTL:
+                # 负缓存/解析器抖动: 先用最近成功结果, 但缩短重试间隔
+                ips, kind = list(good[1]), "stale"
+        _DNS_CACHE[key] = (now, list(ips), kind, checked)
+    return list(ips), kind, checked
+
+
+def resolve_domain_ips(domain, family):
+    """兼容接口: 只返回解析到的全球单播地址"""
+    return resolve_domain_status(domain, family)[0]
+
+
+def invalidate_dns_cache(domain, family):
+    """记录变更后清掉该族解析缓存与 last-known-good, 尽快反映新 IP"""
+    with _DNS_CACHE_LOCK:
+        _DNS_CACHE.pop((domain, family), None)
+        _DNS_LAST_GOOD.pop((domain, family), None)
+
+
+def effective_family_domain(srv, family):
+    """节点某协议族的有效域名; 旧数据 domain6 为空时与 DNS 计划共用同一派生规则"""
+    if family == "ipv6":
+        return srv.get("domain6") or derive_v6_domain(srv.get("domain", ""))
+    return srv.get("domain", "")
+
+
+def same_ip(a, b):
+    """IPv6 压缩/展开写法不同也应视为同一地址"""
+    try:
+        return ipaddress.ip_address(str(a)) == ipaddress.ip_address(str(b))
+    except ValueError:
+        return str(a) == str(b)
+
+
+def dns_sync_ready(srv, family, domain, reported):
+    """中控已通过 CF API 写入且记录值与节点上报一致: 可视为记录就绪。
+    实时 DNS 可能仍在传播或被本地解析器负缓存, 不能因此停用协议族。"""
+    if not srv.get("dns_managed") or not domain or not reported:
+        return False
+    ent = (srv.get("dns_sync") or {}).get(family) or {}
+    return (ent.get("state") == "ok" and ent.get("name") == domain
+            and same_ip(ent.get("ip"), reported))
 
 
 def server_family_status(srv):
@@ -1027,9 +1099,9 @@ def server_family_status(srv):
     for family in ("ipv4", "ipv6"):
         enabled = (mode == "dual") or (mode == family)
         reported = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
-        domain = srv.get("domain6") if family == "ipv6" else srv.get("domain", "")
+        domain = effective_family_domain(srv, family)
         ent = {"enabled": enabled, "active": False, "reported_ip": reported,
-               "domain": domain, "error": ""}
+               "domain": domain, "error": "", "dns_check": "", "checked_at": 0}
         if not enabled:
             ent["error"] = "已停用"
         elif srv.get("cert_mode") == "acme":
@@ -1039,15 +1111,29 @@ def server_family_status(srv):
                 ent["error"] = ("检测到节点 IPv6, 但未配置 IPv6 域名" if family == "ipv6"
                                 else "未配置 IPv4 域名")
             else:
-                ips = resolve_domain_ips(domain, family)
                 rr = "AAAA" if family == "ipv6" else "A"
-                if not ips:
-                    ent["error"] = "域名缺少 %s 记录" % rr
-                elif reported and reported not in ips:
-                    ent["error"] = "%s 记录未指向节点上报的 %s" % (rr, family.upper())
-                elif family == "ipv4" or reported:
-                    # IPv4 为兼容旧流程: 有 A 记录即可先启用; IPv6 必须等到上报匹配
+                synced = dns_sync_ready(srv, family, domain, reported)
+                if synced:
+                    # CF API 已写入且值与上报一致: 不再依赖本机解析器 (可能被负缓存/超时干扰)
                     ent["active"] = True
+                    ent["dns_check"] = "cf-synced"
+                    ent["checked_at"] = int(time.time())
+                else:
+                    ips, dns_kind, checked_at = resolve_domain_status(domain, family)
+                    ent["dns_check"] = dns_kind
+                    ent["checked_at"] = int(checked_at)
+                    if not ips and dns_kind == "error":
+                        ent["error"] = "DNS 解析暂不可用"
+                    elif not ips:
+                        ent["error"] = "域名缺少 %s 记录" % rr
+                    elif reported and not any(same_ip(reported, ip) for ip in ips):
+                        if dns_kind == "stale":
+                            ent["error"] = "DNS 解析暂不可用"
+                        else:
+                            ent["error"] = "%s 记录未指向节点上报的 %s" % (rr, family.upper())
+                    elif family == "ipv4" or reported:
+                        # IPv4 为兼容旧流程: 有 A 记录即可先启用; IPv6 必须等到上报匹配
+                        ent["active"] = True
         else:
             if reported:
                 ent["active"] = True
@@ -1060,8 +1146,9 @@ def server_family_status(srv):
 
 def family_status_key(srv):
     st = server_family_status(srv)
-    return ";".join("%s:%s:%s:%s:%s" % (family, st[family]["active"], st[family]["domain"],
-                                        st[family]["reported_ip"], st[family]["error"])
+    # 不包含展示性 error/dns_check: 瞬时解析错误不应改变配置缓存键
+    return ";".join("%s:%s:%s:%s" % (family, st[family]["active"], st[family]["domain"],
+                                     st[family]["reported_ip"])
                     for family in ("ipv4", "ipv6"))
 
 
@@ -1069,10 +1156,10 @@ def server_acme_domains(srv):
     """ACME 申请域名: IPv4 域名保持旧行为; IPv6 仅 AAAA 校验通过后才加入证书申请"""
     st = server_family_status(srv)
     domains = []
-    if st["ipv4"]["enabled"] and srv.get("domain"):
-        domains.append(srv["domain"])
-    if st["ipv6"]["enabled"] and srv.get("domain6") and st["ipv6"]["active"]:
-        domains.append(srv["domain6"])
+    if st["ipv4"]["enabled"] and st["ipv4"]["domain"]:
+        domains.append(st["ipv4"]["domain"])
+    if st["ipv6"]["enabled"] and st["ipv6"]["domain"] and st["ipv6"]["active"]:
+        domains.append(st["ipv6"]["domain"])
     return domains
 
 
@@ -1108,7 +1195,7 @@ def node_dns_plan(srv):
     if mode in ("dual", "ipv4") and srv.get("domain"):
         out.append(("ipv4", srv["domain"], "A"))
     if mode in ("dual", "ipv6"):
-        d6 = srv.get("domain6") or derive_v6_domain(srv.get("domain", ""))
+        d6 = effective_family_domain(srv, "ipv6")
         if d6:
             out.append(("ipv6", d6, "AAAA"))
     return out
@@ -1210,7 +1297,7 @@ def cf_ensure_record(token, zone_id, name, rtype, content):
             cf_request("DELETE", "/zones/%s/dns_records/%s" % (zone_id, rid), token)
             changes.append("删除冲突的 %s 记录" % other)
         elif rt == want:
-            if not matched and rec.get("content") == content and not rec.get("proxied"):
+            if not matched and same_ip(rec.get("content"), content) and not rec.get("proxied"):
                 matched = True  # 已符合目标状态
             elif not matched:
                 cf_request("PUT", "/zones/%s/dns_records/%s" % (zone_id, rid), token,
@@ -1235,7 +1322,7 @@ def cf_purge_record(token, zone_id, name, rtype, content):
                       % (zone_id, urllib.parse.quote(name), rtype), token) or []
     done = False
     for rec in recs:
-        if rec.get("content") == content:
+        if same_ip(rec.get("content"), content):
             cf_request("DELETE", "/zones/%s/dns_records/%s" % (zone_id, rec["id"]), token)
             done = True
     return done
@@ -1318,7 +1405,7 @@ def sync_node_dns(base, sid, reason="auto", lock=None):
             try:
                 zid = cf_find_zone(token, name, zone_id)
                 changes = cf_ensure_record(token, zid, name, rtype, ip)
-                _DNS_CACHE.pop((name, family), None)  # 清解析缓存, 协议族状态尽快就绪
+                invalidate_dns_cache(name, family)  # 清解析缓存, 协议族状态尽快就绪
                 new = {"name": name, "ip": ip, "state": "ok", "at": now, "error": "",
                        "detail": "; ".join(changes) if changes else "已是最新"}
             except Exception as e:  # noqa: BLE001
@@ -1338,7 +1425,7 @@ def sync_node_dns(base, sid, reason="auto", lock=None):
             try:
                 zid = cf_find_zone(token, old_name, zone_id)
                 cf_purge_record(token, zid, old_name, "A" if family == "ipv4" else "AAAA", old_ip)
-                _DNS_CACHE.pop((old_name, family), None)
+                invalidate_dns_cache(old_name, family)
             except Exception:  # noqa: BLE001  清理失败不阻断状态收敛
                 pass
         sync[family] = {"state": "off", "name": "", "ip": "", "error": "", "at": now}

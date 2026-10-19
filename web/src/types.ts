@@ -50,6 +50,8 @@ export interface FamilyStatus {
   domain: string
   error: string
   address: string
+  dns_check?: 'ok' | 'nodata' | 'error' | 'stale' | 'cf-synced' | ''
+  checked_at?: number
 }
 
 export interface DnsSyncState {

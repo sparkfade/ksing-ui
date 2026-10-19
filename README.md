@@ -68,6 +68,7 @@ python3 /opt/ksing-ui/server.py --dir /etc/ksing-ui --listen 0.0.0.0 --port 8080
   - 还有 IPv6：自动使用首段加 `-v6` 的独立域名创建 AAAA 记录（`hk1-v6.example.com`）
   - 严禁同一域名同时有 A 和 AAAA；同名冲突记录会被自动纠正
   - IP 变化自动更新（DDNS）；删除节点时自动清理记录
+  - DNS 就绪以中控 CF 同步结果为准；本机递归解析超时/负缓存不会停用协议族。订阅只包含已就绪的族，双栈节点会拆成 IPv4/IPv6 两条
 - **域名证书**：记录就绪后由节点 sing-box 原生 ACME(Let's Encrypt）自动申请续签，放行 80 端口供验证
 - **IP 自签证书**：无域名时生成含 IPv4/IPv6 SAN 的自签证书，客户端需 allowInsecure
 - **不安全模式**：需显式确认，自签假域名证书

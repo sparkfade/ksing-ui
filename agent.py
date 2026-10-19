@@ -520,10 +520,11 @@ _PUBLIC_ENDPOINTS = {
 }
 
 
-def query_public_ips():
+def query_public_ips(families=("ipv4", "ipv6")):
     """分别探测公网 IPv4/IPv6; 仅接受全球单播地址, 不走代理/重定向"""
     out = {"ipv4": "", "ipv6": ""}
-    for family, urls in _PUBLIC_ENDPOINTS.items():
+    for family in families:
+        urls = _PUBLIC_ENDPOINTS[family]
         for url in urls:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
@@ -542,21 +543,32 @@ def query_public_ip():
     return query_public_ips()["ipv4"]
 
 
-_PUBLIC_IPS = {"value": {"ipv4": "", "ipv6": ""}, "at": 0.0}
+_PUBLIC_IPS = {"value": {"ipv4": "", "ipv6": ""},
+               "at": {"ipv4": 0.0, "ipv6": 0.0},
+               "ok": {"ipv4": False, "ipv6": False}}
+PUBLIC_IP_TTL = 6 * 3600     # 成功值有效期
+PUBLIC_IP_RETRY = 60         # 失败族重试间隔 (不再被另一族的 6 小时 TTL 拖住)
 
 
 def cached_public_ips():
-    """低频获取公网 IPv4/IPv6; 失败时保留各族上次成功值, 避免反代回环地址污染链接"""
+    """低频获取公网 IPv4/IPv6; 分族独立计时, 失败时保留上次成功值避免链接抖动"""
     now = time.time()
     cur = _PUBLIC_IPS["value"]
-    ttl = 6 * 3600 if (cur["ipv4"] or cur["ipv6"]) else 600
-    if _PUBLIC_IPS["at"] and now - _PUBLIC_IPS["at"] < ttl:
-        return dict(cur)
-    got = query_public_ips()
-    _PUBLIC_IPS["at"] = now
+    due = []
     for family in ("ipv4", "ipv6"):
-        if got[family]:
-            cur[family] = got[family]
+        age = now - _PUBLIC_IPS["at"][family]
+        ttl = PUBLIC_IP_TTL if _PUBLIC_IPS["ok"][family] else PUBLIC_IP_RETRY
+        if not _PUBLIC_IPS["at"][family] or age >= ttl:
+            due.append(family)
+    if due:
+        got = query_public_ips(tuple(due))
+        for family in due:
+            _PUBLIC_IPS["at"][family] = now
+            if got[family]:
+                cur[family] = got[family]
+                _PUBLIC_IPS["ok"][family] = True
+            else:
+                _PUBLIC_IPS["ok"][family] = False
     return dict(cur)
 
 

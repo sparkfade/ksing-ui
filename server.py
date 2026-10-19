@@ -304,6 +304,7 @@ _BUNDLE_CACHE = {}  # sid -> (cache_key, bundle_hash); 输入文件 mtime 不变
 _KEY_CACHE = {"at": 0.0, "key": None}  # 全局输入指纹, 5 秒内复用, 长轮询每秒 tick 只花几次 stat
 _CONFPULL = {}  # sid -> 进行中的长轮询数
 _CONFPULL_LOCK = threading.Lock()
+REPORTED_IP_GRACE = 600  # 单族上报为空时保留旧值的宽限期 (防解析器抖动/agent 重启导致订阅闪断)
 
 
 def _input_key(sid, srv):
@@ -1900,7 +1901,7 @@ def h_agent_config(ctx):
         wait = min(max(int(ctx.query.get("wait") or 0), 0), 45)
     except ValueError:
         wait = 0
-    touch_server(ctx.sid, last_seen=int(time.time()), reported_ip=ctx.client_ip)  # 心跳前置
+    touch_server(ctx.sid, last_seen=int(time.time()))  # 心跳前置; 不用连接来源冒充公网 IP
     if wait:  # 限制单节点并发长轮询, 防被攻陷 token 耗尽面板线程
         with _CONFPULL_LOCK:
             n = _CONFPULL.get(ctx.sid, 0)
@@ -1921,7 +1922,7 @@ def h_agent_config(ctx):
                     _CONFPULL[ctx.sid] = left
                 else:
                     _CONFPULL.pop(ctx.sid, None)
-    touch_server(ctx.sid, last_seen=int(time.time()), reported_ip=ctx.client_ip)
+    touch_server(ctx.sid, last_seen=int(time.time()))
     if cur and cur == h:
         # 即使配置未变也带上 agent 版本信息, 便于节点自更新
         return 200, {"unchanged": True, "hash": h, "agent_sha256": agent_py_sha256()}
@@ -2029,17 +2030,30 @@ def h_agent_report(ctx):
         legacy = clean_public_ip(b.get("public_ip"))
         reported_ipv4 = legacy if legacy and "." in legacy else None
         reported_ipv6 = legacy if legacy and ":" in legacy else None
-    # 反代后 TCP 对端可能是 nginx/回环地址; 优先采用经校验的 agent 自报公网 IP
-    reported_ip = reported_ipv4 or reported_ipv6 or ctx.client_ip
+    # 只采用 agent 自报且经校验的公网 IP; 连接来源可能是反代/回环地址, 不能冒充节点地址
+    reported_ip = reported_ipv4 or reported_ipv6 or ""
     # 心跳先行: 记账/状态维护等任何后续故障都不能把节点打成离线
-    fields = {"last_seen": int(time.time()),
+    now = int(time.time())
+    fields = {"last_seen": now,
               "applied_hash": str(b.get("applied_hash") or "")[:64],
               "agent_version": str(b.get("agent_version") or "")[:32],
-              "last_error": str(b.get("last_error") or "")[:300],
-              "reported_ip": reported_ip}
+              "last_error": str(b.get("last_error") or "")[:300]}
+    if reported_ip:
+        fields["reported_ip"] = reported_ip
     if has_family_fields:
-        fields["reported_ipv4"] = reported_ipv4
-        fields["reported_ipv6"] = reported_ipv6
+        prev = ctx.srv or {}
+        for family, value in (("ipv4", reported_ipv4), ("ipv6", reported_ipv6)):
+            key = "reported_" + family
+            at_key = key + "_at"
+            if value:
+                fields[key] = value
+                fields[at_key] = now
+            else:
+                # 单次探测失败/agent 重启不要立刻清空, 避免订阅族闪断
+                prev_val = prev.get(key) or ""
+                prev_at = int(prev.get(at_key) or 0)
+                if not prev_val or (prev_at and now - prev_at >= REPORTED_IP_GRACE):
+                    fields[key] = ""
     else:
         if reported_ipv4 is not None:
             fields["reported_ipv4"] = reported_ipv4
