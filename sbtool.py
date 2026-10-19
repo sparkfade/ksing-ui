@@ -1079,9 +1079,12 @@ def server_acme_domains(srv):
 # CF Token 只保存在中控 (settings.json 0600), 节点只上报公网 IP, 记录创建由中控执行。
 
 CF_API = os.environ.get("KSING_CF_API", "https://api.cloudflare.com/client/v4").rstrip("/")
+if not CF_API.startswith("https://") and "127.0.0.1" not in CF_API and "::1" not in CF_API:
+    print("警告: KSING_CF_API 非 https, CF Token 将明文传输", file=sys.stderr)
 CF_DNS_TTL = 120
-DNS_SYNC_FAIL_RETRY = 60  # 同步失败后的最小重试间隔 (秒)
-_CF_ZONE_CACHE = {}       # zone 名 -> zone_id (进程内缓存; zone 归属几乎不变)
+DNS_SYNC_FAIL_RETRY = int(os.environ.get("KSING_DNS_FAIL_RETRY", "60"))   # 同步失败后的最小重试间隔 (秒)
+DNS_SYNC_OK_RESYNC = int(os.environ.get("KSING_DNS_OK_RESYNC", "30"))    # 已同步状态下 IP 变更触发重同步的最小间隔 (防被攻陷节点打爆 CF API)
+_CF_ZONE_CACHE = {}        # zone 名 -> zone_id (进程内缓存; zone 归属几乎不变)
 
 
 def derive_v6_domain(domain):
@@ -1208,14 +1211,20 @@ def cf_purge_record(token, zone_id, name, rtype, content):
     return done
 
 
-def dns_sync_needed(srv, now=None):
-    """节点是否需要 (重新) 同步 DNS; 供上报钩子快速判断, 避免每次心跳都走全流程"""
+def dns_sync_needed(srv, now=None, force=False):
+    """节点是否需要 (重新) 同步 DNS; 供上报钩子快速判断, 避免每次心跳都走全流程。
+    force=True (手动强制) 跳过 ok/fail 节流直接同步"""
     if not srv.get("dns_managed") or srv.get("cert_mode") != "acme":
         return False
+    plan = node_dns_plan(srv)
+    if not plan:
+        return False
+    if force:
+        return True
     sync = srv.get("dns_sync") or {}
     now = now or time.time()
     planned = set()
-    for family, name, _rtype in node_dns_plan(srv):
+    for family, name, _rtype in plan:
         planned.add(family)
         ip = srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
         ent = sync.get(family) or {}
@@ -1227,6 +1236,8 @@ def dns_sync_needed(srv, now=None):
             continue
         if ent.get("state") == "fail" and now - float(ent.get("at") or 0) < DNS_SYNC_FAIL_RETRY:
             continue  # 失败防抖
+        if ent.get("state") == "ok" and now - float(ent.get("at") or 0) < DNS_SYNC_OK_RESYNC:
+            continue  # 已同步的 IP 变更节流: 被攻陷节点也不能用上报 IP 打爆 CF API
         return True
     for family in ("ipv4", "ipv6"):
         if family not in planned and (sync.get(family) or {}).get("state") not in (None, "off"):
@@ -1265,9 +1276,11 @@ def sync_node_dns(base, sid, reason="auto", lock=None):
                 sync[family] = new
                 dirty = True
             continue
-        if (reason != "manual" and ent.get("state") == "fail"
-                and now - float(ent.get("at") or 0) < DNS_SYNC_FAIL_RETRY):
-            continue  # 失败防抖, 避免每次心跳都打 CF
+        if reason != "manual":
+            if ent.get("state") == "fail" and now - float(ent.get("at") or 0) < DNS_SYNC_FAIL_RETRY:
+                continue  # 失败防抖, 避免每次心跳都打 CF
+            if ent.get("state") == "ok" and now - float(ent.get("at") or 0) < DNS_SYNC_OK_RESYNC:
+                continue  # IP 变更节流 (防被攻陷节点打爆 CF API)
         if not token:
             new = {"name": name, "ip": ip, "state": "fail",
                    "error": "未配置 Cloudflare API Token (请到设置页配置)", "at": now}
@@ -1284,9 +1297,22 @@ def sync_node_dns(base, sid, reason="auto", lock=None):
         sync[family] = new
         dirty = True
     for family in ("ipv4", "ipv6"):
-        if family not in planned and (sync.get(family) or {}).get("state") not in (None, "off"):
-            sync[family] = {"state": "off", "name": "", "ip": "", "error": "", "at": now}
-            dirty = True
+        if family in planned:
+            continue
+        ent = dict(sync.get(family) or {})
+        if ent.get("state") in (None, "off"):
+            continue
+        # 族被移出计划 (如 dual→ipv4): 删除残留记录, 防域名悬垂到已不用的 IP
+        old_name, old_ip = ent.get("name") or "", ent.get("ip") or ""
+        if old_name and old_ip and token:
+            try:
+                zid = cf_find_zone(token, old_name, zone_id)
+                cf_purge_record(token, zid, old_name, "A" if family == "ipv4" else "AAAA", old_ip)
+                _DNS_CACHE.pop((old_name, family), None)
+            except Exception:  # noqa: BLE001  清理失败不阻断状态收敛
+                pass
+        sync[family] = {"state": "off", "name": "", "ip": "", "error": "", "at": now}
+        dirty = True
     if dirty:
         def _write():
             cur = load_servers(base)
@@ -1740,6 +1766,12 @@ def cmd_set(args):
     if args.admin_pass:
         s["admin_pass_hash"] = hash_password(args.admin_pass)
         changed = True
+    if args.cf_api_token is not None and args.cf_api_token \
+            and not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", args.cf_api_token):
+        die("Cloudflare API Token 格式非法")
+    if args.cf_zone_id is not None and args.cf_zone_id \
+            and not re.fullmatch(r"[0-9a-f]{32}", args.cf_zone_id):
+        die("Cloudflare Zone ID 应为 32 位十六进制")
     if args.auto_detect_interface is not None:
         s["auto_detect_interface"] = args.auto_detect_interface == "on"
         changed = True
@@ -1990,27 +2022,28 @@ def cmd_srv(args):
         token = gen_server_token()
         users = parse_users_arg(base, args.user) if args.user else []
         ip_mode = args.ip_mode
-        domain6 = args.domain6
-        if ip_mode == "dual" and args.domain and not domain6:
-            domain6 = derive_v6_domain(args.domain)  # 双栈: IPv6 域名自动派生首段 -v6
-        cert_mode = args.cert_mode or ("acme" if (args.domain or domain6) else "")
+        domain = (args.domain or "").strip().lower()
+        domain6 = (args.domain6 or "").strip().lower()
+        if ip_mode == "dual" and domain and not domain6:
+            domain6 = derive_v6_domain(domain)  # 双栈: IPv6 域名自动派生首段 -v6
+        cert_mode = args.cert_mode or ("acme" if (domain or domain6) else "")
         if not cert_mode:
             die("未绑定域名时必须显式选择 --cert-mode selfip 或 unsafe")
-        if args.domain and domain6 and args.domain == domain6:
+        if domain and domain6 and domain == domain6:
             die("IPv4 与 IPv6 域名不能相同")
         if ip_mode == "ipv4" and domain6:
             die("仅 IPv4 模式不能配置 --domain6")
-        if ip_mode == "ipv6" and args.domain:
+        if ip_mode == "ipv6" and domain:
             die("仅 IPv6 模式不能配置 --domain")
         if cert_mode == "acme":
-            if ip_mode != "ipv6" and not args.domain:
+            if ip_mode != "ipv6" and not domain:
                 die("acme 模式需要 --domain (IPv4 域名)")
             if ip_mode == "ipv6" and not domain6:
                 die("纯 IPv6 节点需要 --domain6 (IPv6 域名)")
         servers[sid] = {
             "name": args.name, "token_hash": hash_server_token(token),
             "port": args.port,
-            "domain": args.domain or "", "domain6": domain6 or "",
+            "domain": domain, "domain6": domain6,
             "ip_mode": ip_mode, "cert_mode": cert_mode,
             "acme_email": args.acme_email or "",
             "dns_managed": bool(args.dns_managed and cert_mode == "acme"),

@@ -1344,52 +1344,56 @@ def h_settings_get(ctx):
 
 def h_settings_put(ctx):
     b = ctx.body
-    s = sbtool.get_settings(BASE)
-    raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
-    for k in SETTINGS_EDITABLE:
-        if k in b:
-            v = b[k]
-            if k == "panel_port":
-                v = int(v)
-                if not (1 <= v <= 65535):
-                    raise ApiError("端口非法")
-            if k == "sub_port":
-                v = int(v or 0)
-                if not (0 <= v <= 65535):
-                    raise ApiError("订阅端口非法")
-            if k == "auto_detect_interface":
-                v = bool(v)
-            if k == "private_action" and v not in ("reject", "direct", "off"):
-                raise ApiError("private_action 非法")
-            if k == "final":
-                nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
-                if v not in ("direct", "reject") and v not in nodes:
-                    raise ApiError("默认出站不存在: %s" % v)
-            if k == "sni" and v and not re.fullmatch(r"[A-Za-z0-9.\-]{1,128}", str(v)):
-                raise ApiError("SNI 仅限字母/数字/./-")
-            if k == "sub_path":
-                v = str(v).strip().strip("/")
-                if not re.fullmatch(r"[A-Za-z0-9_\-]{1,32}", v):
-                    raise ApiError("订阅路径仅限字母/数字/_/-, 1-32 位")
-                if v == "api" or v == "agent":
-                    raise ApiError("订阅路径不能是 api/agent")
-            if k == "sub_host":
-                v = str(v).strip().rstrip("/")
-                if v and not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9a-fA-F:]+\](:\d{1,5})?", v):
-                    raise ApiError("订阅地址仅限 域名/IP[:端口]")
-                if v and ":" in v and not (1 <= int(v.rsplit(":", 1)[1]) <= 65535):
-                    raise ApiError("订阅地址端口非法")
-            if k == "cf_api_token":
-                v = str(v).strip()
-                if v and not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", v):
-                    raise ApiError("Cloudflare API Token 格式非法")
-            if k == "cf_zone_id":
-                v = str(v).strip().lower()
-                if v and not re.fullmatch(r"[0-9a-f]{32}", v):
-                    raise ApiError("Cloudflare Zone ID 应为 32 位十六进制")
-            raw[k] = v
-            s[k] = v
-    sbtool.save_json(sbtool.paths(BASE)["settings"], raw)
+    with PROC_LOCK:  # load-modify-save 需串行化, 防并发 PUT 丢更新 (含 cf_api_token)
+        s = sbtool.get_settings(BASE)
+        raw = sbtool.load_json(sbtool.paths(BASE)["settings"], {})
+        old_cf_token = raw.get("cf_api_token") or ""
+        for k in SETTINGS_EDITABLE:
+            if k in b:
+                v = b[k]
+                if k == "panel_port":
+                    v = int(v)
+                    if not (1 <= v <= 65535):
+                        raise ApiError("端口非法")
+                if k == "sub_port":
+                    v = int(v or 0)
+                    if not (0 <= v <= 65535):
+                        raise ApiError("订阅端口非法")
+                if k == "auto_detect_interface":
+                    v = bool(v)
+                if k == "private_action" and v not in ("reject", "direct", "off"):
+                    raise ApiError("private_action 非法")
+                if k == "final":
+                    nodes = sbtool.load_json(sbtool.paths(BASE)["nodes"], {})
+                    if v not in ("direct", "reject") and v not in nodes:
+                        raise ApiError("默认出站不存在: %s" % v)
+                if k == "sni" and v and not re.fullmatch(r"[A-Za-z0-9.\-]{1,128}", str(v)):
+                    raise ApiError("SNI 仅限字母/数字/./-")
+                if k == "sub_path":
+                    v = str(v).strip().strip("/")
+                    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,32}", v):
+                        raise ApiError("订阅路径仅限字母/数字/_/-, 1-32 位")
+                    if v == "api" or v == "agent":
+                        raise ApiError("订阅路径不能是 api/agent")
+                if k == "sub_host":
+                    v = str(v).strip().rstrip("/")
+                    if v and not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9a-fA-F:]+\](:\d{1,5})?", v):
+                        raise ApiError("订阅地址仅限 域名/IP[:端口]")
+                    if v and ":" in v and not (1 <= int(v.rsplit(":", 1)[1]) <= 65535):
+                        raise ApiError("订阅地址端口非法")
+                if k == "cf_api_token":
+                    v = str(v).strip()
+                    if v and not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", v):
+                        raise ApiError("Cloudflare API Token 格式非法")
+                if k == "cf_zone_id":
+                    v = str(v).strip().lower()
+                    if v and not re.fullmatch(r"[0-9a-f]{32}", v):
+                        raise ApiError("Cloudflare Zone ID 应为 32 位十六进制")
+                raw[k] = v
+                s[k] = v
+        if (raw.get("cf_api_token") or "") != old_cf_token:
+            sbtool._CF_ZONE_CACHE.clear()  # 换账号后 zone 归属可能完全不同
+        sbtool.save_json(sbtool.paths(BASE)["settings"], raw)
     return 200, {"ok": True}
 
 
@@ -1578,6 +1582,7 @@ def h_servers_update(ctx):
         servers = sbtool.load_servers(BASE)
         if sid not in servers:
             raise ApiError("节点不存在", 404)
+        old_srv = dict(servers[sid])
         merged = dict(servers[sid])
         merged.update(fields)
         _apply_domain_plan(merged)  # domain6 显式清空 = 跟随 domain 重新派生
@@ -1585,17 +1590,51 @@ def h_servers_update(ctx):
         _check_domain_unique(servers, sid, merged)
         dns_keys = ("domain", "domain6", "ip_mode", "dns_managed", "cert_mode")
         dns_changed = any(servers[sid].get(k) != merged.get(k) for k in dns_keys)
-        if dns_changed:
-            merged["dns_sync"] = {}  # 域名/模式变了, 重置同步状态强制重新同步
+        # 注意不能清空 dns_sync: off 族残留记录的清道夫需要其中的旧 name/ip
         servers[sid].update(merged)
         sbtool.save_servers(BASE, servers)
-    if dns_changed and merged.get("dns_managed"):
-        maybe_dns_sync(sid, reason="manual")
+    if dns_changed:
+        # 清理旧方案里已不在新方案的域名记录 (改名/切模式后旧记录不悬垂)
+        new_names = {(f, n) for f, n, _ in sbtool.node_dns_plan(merged)}
+        stale = []
+        for family, name, rtype in sbtool.node_dns_plan(old_srv):
+            if (family, name) not in new_names:
+                ip = old_srv.get("reported_ipv4" if family == "ipv4" else "reported_ipv6") or ""
+                if ip:
+                    stale.append((family, name, rtype, ip))
+        if stale:
+            threading.Thread(target=_dns_purge_bg, args=(stale,), daemon=True).start()
+        if merged.get("dns_managed"):
+            maybe_dns_sync(sid, reason="manual")
     return 200, {"ok": True}
 
 
-def _dns_cleanup_bg(srv):
-    """节点删除后清理其 Cloudflare 记录 (仅删指向该节点上报 IP 的本族记录)"""
+def _dns_purge_bg(stale):
+    """后台删除过期 DNS 记录 [(family, name, rtype, ip)]; 仅删指向已知旧 IP 的记录"""
+    s = sbtool.get_settings(BASE)
+    token = s.get("cf_api_token") or ""
+    if not token:
+        return
+    zone_id = s.get("cf_zone_id") or ""
+    for _family, name, rtype, ip in stale:
+        try:
+            zid = sbtool.cf_find_zone(token, name, zone_id)
+            sbtool.cf_purge_record(token, zid, name, rtype, ip)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
+
+def _dns_cleanup_bg(srv, sid):
+    """节点删除后清理其 Cloudflare 记录 (仅删指向该节点上报 IP 的本族记录)。
+    先等该节点进行中的同步线程结束, 防 cleanup 与 ensure 竞态产生孤儿记录"""
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        with _DNS_SYNCING_LOCK:
+            busy = sid in _DNS_SYNCING
+        if not busy:
+            break
+        time.sleep(0.5)
     s = sbtool.get_settings(BASE)
     token = s.get("cf_api_token") or ""
     if not token:
@@ -1634,7 +1673,7 @@ def h_servers_del(ctx):
         if changed:
             sbtool.save_json(sbtool.paths(BASE)["routes"], rc)
     if srv.get("dns_managed"):
-        threading.Thread(target=_dns_cleanup_bg, args=(srv,), daemon=True).start()
+        threading.Thread(target=_dns_cleanup_bg, args=(srv, sid), daemon=True).start()
     return 200, {"ok": True}
 
 
@@ -1676,9 +1715,10 @@ _DNS_SYNCING_LOCK = threading.Lock()
 
 
 def maybe_dns_sync(sid, reason="auto"):
-    """需要同步时启动后台线程执行 Cloudflare DNS 同步; 绝不阻塞调用方 (如节点心跳)"""
+    """需要同步时启动后台线程执行 Cloudflare DNS 同步; 绝不阻塞调用方 (如节点心跳)。
+    reason=manual 时强制同步 (跳过 ok/fail 节流)"""
     srv = sbtool.load_servers(BASE).get(sid)
-    if not srv or not sbtool.dns_sync_needed(srv):
+    if not srv or not sbtool.dns_sync_needed(srv, force=(reason == "manual")):
         return False
     with _DNS_SYNCING_LOCK:
         if sid in _DNS_SYNCING:

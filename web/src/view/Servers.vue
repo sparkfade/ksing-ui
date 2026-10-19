@@ -124,7 +124,7 @@
             <Toggle v-model="form.dns_managed" label="Cloudflare 自动 DNS" />
             <p class="muted dns-hint">
               <template v-if="form.dns_managed && !cfTokenSet">未配置 Cloudflare API Token（请到 设置 页配置），记录不会自动创建。</template>
-              <template v-else-if="form.dns_managed">节点安装后上报 IP，中控自动创建/更新 A 与 AAAA 记录（proxied 关闭），随后自动申请证书。</template>
+              <template v-else-if="form.dns_managed">节点安装后上报 IP，中控自动创建/更新 A 与 AAAA 记录（proxied 关闭），随后自动申请证书；同名异族冲突记录会被自动纠正。</template>
               <template v-else>关闭则需在 Cloudflare 手动解析域名到节点 IP。</template>
             </p>
           </div>
@@ -258,16 +258,18 @@ const form = reactive({
 const cfTokenSet = ref(false)
 
 // 与后端 sbtool.derive_v6_domain 同规则: 双栈时 IPv6 域名 = 首段加 -v6
-const derivedDomain6 = computed(() => {
-  const d = form.domain.trim().toLowerCase()
-  if (!d || form.ip_mode !== 'dual') return ''
+function deriveV6(d: string): string {
+  d = d.trim().toLowerCase()
+  if (!d) return ''
   const labels = d.split('.')
   if (labels.length >= 3) {
     labels[0] += '-v6'
     return labels.join('.')
   }
   return `v6.${d}`
-})
+}
+
+const derivedDomain6 = computed(() => (form.ip_mode === 'dual' ? deriveV6(form.domain) : ''))
 
 // 切换网络模式时清空不适用的域名
 watch(
@@ -406,13 +408,15 @@ function openAdd() {
 
 function openEdit(s: ServerItem) {
   editing.value = s
+  // domain6 若恰为旧域名的自动派生值则预清空: 改绑定域名后留空即跟随重新派生
+  const autoDerived = s.domain6 && s.domain6 === deriveV6(s.domain || '')
   Object.assign(form, {
     name: s.name,
     port: s.port,
     ip_mode: s.ip_mode || 'dual',
     cert_mode: s.cert_mode || (s.domain || s.domain6 ? 'acme' : 'selfip'),
     domain: s.ip_mode === 'ipv6' ? s.domain6 : s.domain,
-    domain6: s.domain6 || '',
+    domain6: autoDerived ? '' : s.domain6 || '',
     acme_email: s.acme_email,
     dns_managed: !!s.dns_managed,
     unsafe_ok: false,

@@ -799,10 +799,13 @@ def main():
                 pull_config(state)
                 break
             except Exception as e:  # noqa: BLE001
-                if time.time() >= deadline:
+                msg = str(e)
+                LAST_ERROR[0] = msg[:300]
+                # 只有 DNS/证书未就绪类错误值得等 (面板正在建记录); 其他错误重试无意义
+                retryable = any(k in msg for k in ("DNS", "域名", "未就绪"))
+                if not retryable or time.time() >= deadline:
                     raise
-                LAST_ERROR[0] = str(e)[:300]
-                log("首次拉取配置失败: %s (10 秒后重试, 等待面板 DNS 同步生效)" % e)
+                log("首次拉取配置失败: %s (10 秒后重试, 等待面板 DNS 同步生效)" % msg)
                 time.sleep(10)
         if not singbox_running():
             log("sing-box 未运行, 启动")
